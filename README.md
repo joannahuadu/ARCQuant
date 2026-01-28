@@ -15,6 +15,18 @@ While fine-grained quantization (e.g., Block-wise/NVFP4) effectively isolates qu
 
 ARCQuant takes a different approach. Instead of treating outliers separately, we leverage the structural sparsity of quantization errors in fine-grained settings. We capture the quantization residuals of these critical channels and fuse them back into the computation as **Augmented Residual Channels (ARC)**.
 
+To do: 
+
+- [x] Release arxiv version of [ARCQuant](https://arxiv.org/abs/2601.07475).
+- [x] Release code for reproducing results.
+- [x] Release CUDA kernels on NVFP4.
+- [x] Release calibration and preprocessing scripts.
+- [ ] Support [vLLM](https://github.com/vllm-project/vllm) integration.
+- [ ] **Model Support**: Add support for more model families:
+    - [ ] Qwen3
+    - [ ] Mixtral
+    - [ ] Wan2.2
+
 
 ## 1. Installation
 ```bash

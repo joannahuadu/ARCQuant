@@ -68,7 +68,7 @@ class QLinearLayer(nn.Module):
         if self.quant_type == 'NVFP4':
             y = agemm.matmul(qx, self.W, scale_x, self.scale_w, scale * self.scale)
         else:
-            y = F.linear(qx, self.W) * scale * self.scale
+            y = F.linear(qx, self.W)
         
         torch.cuda.synchronize()
         if self.bias is not None:
