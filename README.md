@@ -21,7 +21,7 @@ To do:
 - [x] Release code for reproducing results.
 - [x] Release CUDA kernels on NVFP4.
 - [x] Release calibration and preprocessing scripts.
-- [ ] Support [vLLM](https://github.com/vllm-project/vllm) integration.
+- [x] Support [vLLM](https://github.com/vllm-project/vllm) integration.
 - [ ] **Model Support**: Add support for more model families:
     - [ ] Qwen3
     - [ ] Mixtral
@@ -78,8 +78,25 @@ FlashInfer:
 cd third-party/flashinfer
 python -m pip install -v .
 ```
+We will release our vLLM evaluation very soon. 
 
-End-to-end efficiency:
-```bash
-python benchmarks/benchmark_e2e_arc.py --model 'qwen2.5-7b' --batch_size 4 --prefill_seq_len 1024
+## 4. Citation
 ```
+@article{meng2026arcquant,
+  title={ARCQuant: Boosting NVFP4 Quantization with Augmented Residual Channels for LLMs},
+  author={Meng, Haoqian and Luo, Yilun and Zhao, Yafei and Liu, Wenyuan and Zhang, Peng and Ma, Xindian},
+  journal={arXiv preprint arXiv:2601.07475},
+  year={2026}
+}
+```
+
+## 5. Acknowledagement
+Our code is built on the following repos, thank you for your contributions to community:
+- [Atom](https://github.com/efeslab/Atom.git)
+- [QuaRot](https://github.com/spcl/QuaRot)
+- [FlashInfer](https://github.com/flashinfer-ai/flashinfer/tree/main)
+- [CUTLASS](https://github.com/NVIDIA/cutlass)
+- [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+- [MicroMix](https://github.com/EleutherAI/lm-evaluation-harness)
+
+
