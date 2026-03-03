@@ -82,8 +82,8 @@ def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
         # return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
     else:
         index = reorder_index.to(torch.int32)
-        return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
-        # return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
+        # return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
+        return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
 
 class QLlamaDecoderLayer(nn.Module):
     def __init__(

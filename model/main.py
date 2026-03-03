@@ -92,7 +92,7 @@ if __name__ == '__main__':
         help="The calibration dataset to use."
     )
     parser.add_argument(
-        "--quant_type", type=str, default="NVFP4", choices=["NVFP4", "MXFP4", "INT4"], 
+        "--quant_type", type=str, default="NVFP4", choices=["NVFP4", "MXFP4", "INT4", "HiF4"], 
         help="data type for W and A quantization."
     )
   
@@ -135,9 +135,9 @@ if __name__ == '__main__':
     torch.cuda.reset_max_memory_allocated()
     print("Reordering model...")
     start_time=time.time()
-    # model = reorder_model_func(
-    #     model, device=DEV, kv_cache=args.kv_cache, reorder_index=reorder_index, select_nums=select_nums, quant_type=args.quant_type
-    # )
+    model = reorder_model_func(
+        model, device=DEV, kv_cache=args.kv_cache, reorder_index=reorder_index, select_nums=select_nums, quant_type=args.quant_type
+    )
     end_time=time.time()
     peak_memory = torch.cuda.max_memory_allocated()
 
