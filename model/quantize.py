@@ -307,7 +307,7 @@ def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
         q_w = torch.cat([quantize_func(w_fp32), quantize_func(w_fp32[:, topk_index])], dim=1) * scale
         return q_w.to(orig_dtype), (scale_w * scale).to(orig_dtype), scale.to(orig_dtype)
 
-def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
+def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4', *, ste: bool = False):
     orig_dtype = x.dtype  
     
     if dtype == "NVFP4":
@@ -328,7 +328,10 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
     
     if select_num == 0:
         q_x = quantize_func(x_fp32) * scale
-        return q_x.to(orig_dtype), scale_x.to(orig_dtype), scale.to(orig_dtype)
+        q_x = q_x.to(orig_dtype)
+        if ste:
+            q_x = x + (q_x - x).detach()
+        return q_x, scale_x.to(orig_dtype), scale.to(orig_dtype)
     else:
         topk_index = reorder_index[-select_num:]
         q_x = quantize_func(x_fp32)
@@ -336,7 +339,13 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
         q_error_k = quantize_func(error_e[:, topk_index])
         
         ret_x = torch.cat([q_x, q_error_k], dim=1) * scale
-        return ret_x.to(orig_dtype), scale_x.to(orig_dtype), scale.to(orig_dtype)
+        ret_x = ret_x.to(orig_dtype)
+        if ste:
+            main_dim = int(x.shape[1])
+            main = x + (ret_x[:, :main_dim] - x).detach()
+            extra = ret_x[:, main_dim:].detach()
+            ret_x = torch.cat([main, extra], dim=1)
+        return ret_x, scale_x.to(orig_dtype), scale.to(orig_dtype)
 
 @torch.no_grad()
 def hadamard_transform(x, normalize=True, block_size=-1):
