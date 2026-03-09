@@ -3,10 +3,6 @@ import torch.nn.functional as F
 import numpy as np
 import gc
 
-import sys
-sys.path.append('kernels/build/')
-import agemm 
-
 import math
 import random
 
@@ -304,12 +300,12 @@ def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
     scale_w = w_fp32.abs().max(dim=1, keepdim=True)[0]
     
     if select_num == 0:
-        q_w = quantize_func(w_fp32)
-        return q_w.to(orig_dtype), scale_w.to(orig_dtype), scale.to(orig_dtype)
+        q_w = quantize_func(w_fp32) * scale
+        return q_w.to(orig_dtype), (scale_w * scale).to(orig_dtype), scale.to(orig_dtype)
     else:
         topk_index = reorder_index[-select_num:]
-        q_w = torch.cat([quantize_func(w_fp32), quantize_func(w_fp32[:, topk_index])], dim=1)
-        return q_w.to(orig_dtype), scale_w.to(orig_dtype), scale.to(orig_dtype)
+        q_w = torch.cat([quantize_func(w_fp32), quantize_func(w_fp32[:, topk_index])], dim=1) * scale
+        return q_w.to(orig_dtype), (scale_w * scale).to(orig_dtype), scale.to(orig_dtype)
 
 def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
     orig_dtype = x.dtype  
@@ -331,7 +327,7 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
     scale_x = x_fp32.abs().max(dim=1, keepdim=True)[0]
     
     if select_num == 0:
-        q_x = quantize_func(x_fp32)
+        q_x = quantize_func(x_fp32) * scale
         return q_x.to(orig_dtype), scale_x.to(orig_dtype), scale.to(orig_dtype)
     else:
         topk_index = reorder_index[-select_num:]

@@ -4,9 +4,7 @@ import math
 import torch
 import functools
 
-import sys
-sys.path.append('./kernels/build/')
-import agemm
+from optional_agemm import require_agemm
 
 def get_minq_maxq(bits: int, sym: bool):
     if sym:
@@ -47,7 +45,7 @@ def init_kv_i4(kv_data, kv_param,
                last_page_offset, k,
                v, k_param, v_param,
                seqlen_indptr, layer_idx):
-    return agemm.init_kv_i4(
+    return require_agemm().init_kv_i4(
         kv_data, kv_param,
         kv_indptr, kv_indices,
         last_page_offset, k,
@@ -60,7 +58,7 @@ def append_kv_i4(kv_data, kv_param,
                last_page_offset, k,
                v, k_param, v_param,
                layer_idx):
-    return agemm.append_kv_i4(
+    return require_agemm().append_kv_i4(
         kv_data, kv_param,
         kv_indptr, kv_indices,
         last_page_offset, k,
@@ -70,7 +68,7 @@ def append_kv_i4(kv_data, kv_param,
 def batch_decode_i4(o, q, kv_data, kv_param,
                kv_indptr, kv_indices,
                last_page_offset, layer_idx):
-    return agemm.batch_decode_i4(
+    return require_agemm().batch_decode_i4(
         o, q, kv_data, kv_param,
         kv_indptr, kv_indices,
         last_page_offset, layer_idx)
@@ -81,7 +79,7 @@ def init_kv_f16(kv_data, kv_param,
                last_page_offset, k,
                v, k_param, v_param,
                seqlen_indptr, layer_idx):
-    return agemm.init_kv_f16(
+    return require_agemm().init_kv_f16(
         kv_data, kv_param,
         kv_indptr, kv_indices,
         last_page_offset, k,
@@ -94,7 +92,7 @@ def append_kv_f16(kv_data, kv_param,
                last_page_offset, k,
                v, k_param, v_param,
                layer_idx):
-    return agemm.append_kv_f16(
+    return require_agemm().append_kv_f16(
         kv_data, kv_param,
         kv_indptr, kv_indices,
         last_page_offset, k,
@@ -104,7 +102,7 @@ def append_kv_f16(kv_data, kv_param,
 def batch_decode_f16(o, q, kv_data, kv_param,
                kv_indptr, kv_indices,
                last_page_offset, layer_idx):
-    return agemm.batch_decode_f16(
+    return require_agemm().batch_decode_f16(
         o, q, kv_data, kv_param,
         kv_indptr, kv_indices,
         last_page_offset, layer_idx)

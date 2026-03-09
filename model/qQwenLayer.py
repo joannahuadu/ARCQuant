@@ -7,9 +7,7 @@ from qLinearLayer import QLinearLayer
 from quantize import *
 from visualize import *
 import os
-import sys
-sys.path.append('kernels/build/')
-import agemm 
+from optional_agemm import HAS_AGEMM, require_agemm
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -71,17 +69,16 @@ def get_hadamard(n):
 
 def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
     scale = torch.max(x.abs()).float() / (448.0*6.0)
-    qx, scale_x = agemm.reorder_quantize_x(x/scale, reorder_index, select_num)
+    qx, scale_x = require_agemm().reorder_quantize_x(x / scale, reorder_index, select_num)
     return qx, scale_x, scale
 
 def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
-    if quant_type == 'NVFP4':
+    if quant_type == 'NVFP4' and HAS_AGEMM:
         # return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
         return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
-    else:
-        index = reorder_index.to(torch.int32)
-        # return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
-        return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
+    index = reorder_index.to(torch.int32)
+    # return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
+    return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
 
         
 class QQwen2RMSNorm(nn.Module):

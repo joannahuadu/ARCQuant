@@ -5,9 +5,6 @@ import math
 from qLinearLayer import QLinearLayer
 from quantize import *
 import os
-import sys
-sys.path.append('kernels/build/')
-import agemm 
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
