@@ -101,6 +101,11 @@ if __name__ == '__main__':
         "--quant_type", type=str, default="NVFP4", choices=["NVFP4", "MXFP4", "INT4", "HiF4"], 
         help="data type for W and A quantization."
     )
+    parser.add_argument(
+        "--no_xw_reorder",
+        action="store_true",
+        help="Disable channel reordering for both activations (X) and weights (W).",
+    )
 
     # ---- activation 2:4 x-mask (FlatQuant-style switch_top2_hard) ----
     parser.add_argument(
@@ -174,6 +179,7 @@ if __name__ == '__main__':
         reorder_index=reorder_index,
         select_nums=select_nums,
         quant_type=args.quant_type,
+        reorder_xw=not bool(args.no_xw_reorder),
         use_x_mask=bool(args.use_x_mask),
         x_mask_tau=float(args.x_mask_tau),
         x_mask_alpha=float(args.x_mask_alpha),

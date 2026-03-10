@@ -86,17 +86,25 @@ def reorder_quantize_x(
     *,
     x_mask: Optional[nn.Module] = None,
     ste: bool = False,
+    reorder_xw: bool = True,
 ):
-    if quant_type == "NVFP4" and HAS_AGEMM and x_mask is None and not ste:
+    if reorder_xw and quant_type == "NVFP4" and HAS_AGEMM and x_mask is None and not ste:
         # return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
         return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
-    index = reorder_index.to(torch.int32)
-    x_reordered = torch.index_select(x, 1, index)
+
+    if reorder_xw:
+        index = reorder_index.to(torch.int32)
+        x_reordered = torch.index_select(x, 1, index)
+        fake_reorder_index = torch.arange(x.shape[-1], device=x.device)
+    else:
+        x_reordered = x
+        fake_reorder_index = reorder_index.to(device=x.device, dtype=torch.long)
+
     if x_mask is not None:
         x_reordered = x_mask(x_reordered)
     return fake_reorder_quantize_x(
         x_reordered,
-        torch.arange(x.shape[-1], device=x.device),
+        fake_reorder_index,
         select_num,
         dtype=quant_type,
         ste=ste,
@@ -111,6 +119,8 @@ class QMixtralDecoderLayer(nn.Module):
         reorder_index,
         layer_idx,
         quant_type,
+        *,
+        reorder_xw: bool = True,
         use_x_mask: bool = False,
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
@@ -126,6 +136,7 @@ class QMixtralDecoderLayer(nn.Module):
             reorder_index=reorder_index,
             i=layer_idx,
             quant_type=quant_type,
+            reorder_xw=reorder_xw,
             use_x_mask=use_x_mask,
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
@@ -138,6 +149,7 @@ class QMixtralDecoderLayer(nn.Module):
             reorder_index=reorder_index,
             i=layer_idx,
             quant_type=quant_type,
+            reorder_xw=reorder_xw,
             use_x_mask=use_x_mask,
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
@@ -247,6 +259,8 @@ class QMixtralAttention(nn.Module):
         reorder_index,
         i,
         quant_type,
+        *,
+        reorder_xw: bool = True,
         use_x_mask: bool = False,
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
@@ -256,6 +270,7 @@ class QMixtralAttention(nn.Module):
 
         self.layer_idx = i
         self.quant_type = quant_type
+        self.reorder_xw = bool(reorder_xw)
         self.q_kv_cache = kv_cache
         self.config = originalAttn.config
         self.hidden_size = originalAttn.hidden_size
@@ -291,25 +306,29 @@ class QMixtralAttention(nn.Module):
             originalAttn.q_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.k_proj = QLinearLayer(
             originalAttn.k_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'k_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'k_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.v_proj = QLinearLayer(
             originalAttn.v_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'v_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'v_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.o_proj = QLinearLayer(
             originalAttn.o_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.register_buffer('q_reorder_index', reorder_index[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')].to(torch.int16))
         self.register_buffer('o_reorder_index', reorder_index[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')].to(torch.int16))
@@ -358,6 +377,7 @@ class QMixtralAttention(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_in,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         torch.cuda.synchronize()
         
@@ -435,6 +455,7 @@ class QMixtralAttention(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_out,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
@@ -464,6 +485,8 @@ class QMixtralSparseMoeBlock(nn.Module):
         reorder_index,
         i,
         quant_type,
+        *,
+        reorder_xw: bool = True,
         use_x_mask: bool = False,
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
@@ -474,6 +497,7 @@ class QMixtralSparseMoeBlock(nn.Module):
         self.ffn_dim = originalSparseMoeBlock.ffn_dim
         self.num_experts = originalSparseMoeBlock.num_experts
         self.top_k = originalSparseMoeBlock.top_k
+        self.reorder_xw = bool(reorder_xw)
 
 
 
@@ -490,6 +514,7 @@ class QMixtralSparseMoeBlock(nn.Module):
                 i,
                 j,
                 quant_type,
+                reorder_xw=self.reorder_xw,
                 use_x_mask=use_x_mask,
                 x_mask_tau=x_mask_tau,
                 x_mask_alpha=x_mask_alpha,
@@ -555,6 +580,8 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
                 layer_idx,
                 moe_idx,
                 quant_type,
+                *,
+                reorder_xw: bool = True,
                 use_x_mask: bool = False,
                 x_mask_tau: float = 1.0,
                 x_mask_alpha: float = 1.0,
@@ -566,6 +593,7 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
 
         nameTemplate = 'layers.{}.{}.{}.{}.{}.{}'
         self.quant_type = quant_type
+        self.reorder_xw = bool(reorder_xw)
         self.x_mask_up = (
             XMaskSwitchTop2Hard(
                 originalBlock.w1.in_features,
@@ -590,19 +618,22 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
             originalBlock.w1,
             select_num=select_nums[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w1', 'input')],
             reorder_index=reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w1', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.w3 = QLinearLayer(
             originalBlock.w3,
             select_num=select_nums[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w3', 'input')],
             reorder_index=reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w3', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.w2 = QLinearLayer(
             originalBlock.w2,
             select_num=select_nums[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w2', 'input')],
             reorder_index=reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w2', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.register_buffer('w1_reorder_index', reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w1', 'input')].to(torch.int16))
         self.register_buffer('w2_reorder_index', reorder_index[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w2', 'input')].to(torch.int16))
@@ -632,6 +663,7 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_up,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         torch.cuda.synchronize()
         x = (qx, scale_x, scale, None, q_len)
@@ -648,6 +680,7 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_down,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         torch.cuda.synchronize()
         tmpResult = (qx, scale_x, scale, None, q_len)
