@@ -38,6 +38,8 @@ class QLinearLayer(nn.Module):
         reorder_index,
         out_reorder_index=None,
         quant_type='NVFP4',
+        *,
+        reorder_xw: bool = True,
     ):
         super().__init__()
       
@@ -53,7 +55,9 @@ class QLinearLayer(nn.Module):
         self.select_num = select_num
         self.quant_type = quant_type
 
-        if self.quant_type == "NVFP4" and HAS_AGEMM:
+        self.use_agemm = bool(self.quant_type == "NVFP4" and HAS_AGEMM and reorder_xw)
+
+        if self.use_agemm:
             # self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w((originalLayer.weight.data), torch.arange(self.in_features).to(torch.int16).cuda(), 0)
             self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w((originalLayer.weight.data), reorder_index.to(torch.int16).cuda(), select_num)
         else:
@@ -65,12 +69,17 @@ class QLinearLayer(nn.Module):
                     reason = f"import failed: {AGEMM_IMPORT_ERROR}"
                 warn_agemm_fallback_once(reason)
 
-            w_reordered = torch.index_select(
-                originalLayer.weight.data, 1, reorder_index.to(torch.int32).cuda()
-            )
+            if reorder_xw:
+                w_reordered = torch.index_select(
+                    originalLayer.weight.data, 1, reorder_index.to(torch.int32).cuda()
+                )
+                fake_reorder_index = torch.arange(self.in_features, device=w_reordered.device)
+            else:
+                w_reordered = originalLayer.weight.data
+                fake_reorder_index = reorder_index.to(device=w_reordered.device, dtype=torch.long)
             self.W, self.scale_w, self.scale = fake_reorder_quantize_w(
                 w_reordered,
-                torch.arange(self.in_features, device=w_reordered.device),
+                fake_reorder_index,
                 select_num,
                 dtype=self.quant_type,
             )
@@ -82,7 +91,7 @@ class QLinearLayer(nn.Module):
     def forward(self, x):
         qx, scale_x, scale, bsz, q_len = x
 
-        if self.quant_type == "NVFP4" and HAS_AGEMM:
+        if self.use_agemm:
             y = require_agemm().matmul(qx, self.W, scale_x, self.scale_w, scale * self.scale)
         else:
             y = F.linear(qx, self.W)

@@ -81,19 +81,26 @@ def reorder_quantize_x(
     *,
     x_mask: Optional[nn.Module] = None,
     ste: bool = False,
+    reorder_xw: bool = True,
 ):
-    if quant_type == "NVFP4" and HAS_AGEMM and x_mask is None and not ste:
+    if reorder_xw and quant_type == "NVFP4" and HAS_AGEMM and x_mask is None and not ste:
         # return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
         return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
 
-    index = reorder_index.to(torch.int32)
-    x_reordered = torch.index_select(x, 1, index)
+    if reorder_xw:
+        index = reorder_index.to(torch.int32)
+        x_reordered = torch.index_select(x, 1, index)
+        fake_reorder_index = torch.arange(x.shape[-1], device=x.device)
+    else:
+        x_reordered = x
+        fake_reorder_index = reorder_index.to(device=x.device, dtype=torch.long)
+
     if x_mask is not None:
         x_reordered = x_mask(x_reordered)
     # return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
     return fake_reorder_quantize_x(
         x_reordered,
-        torch.arange(x.shape[-1], device=x.device),
+        fake_reorder_index,
         select_num,
         dtype=quant_type,
         ste=ste,
@@ -128,6 +135,8 @@ class QQwen2DecoderLayer(nn.Module):
         reorder_index,
         layer_idx,
         quant_type,
+        *,
+        reorder_xw: bool = True,
         use_x_mask: bool = False,
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
@@ -142,6 +151,7 @@ class QQwen2DecoderLayer(nn.Module):
             reorder_index=reorder_index,
             i=layer_idx,
             quant_type=quant_type,
+            reorder_xw=reorder_xw,
             use_x_mask=use_x_mask,
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
@@ -154,6 +164,7 @@ class QQwen2DecoderLayer(nn.Module):
             reorder_index=reorder_index,
             i=layer_idx,
             quant_type=quant_type,
+            reorder_xw=reorder_xw,
             use_x_mask=use_x_mask,
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
@@ -230,6 +241,8 @@ class QQwen2Attention(nn.Module):
         reorder_index,
         i,
         quant_type,
+        *,
+        reorder_xw: bool = True,
         use_x_mask: bool = False,
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
@@ -238,6 +251,7 @@ class QQwen2Attention(nn.Module):
         super().__init__()
         self.layer_idx = i
         self.quant_type = quant_type
+        self.reorder_xw = bool(reorder_xw)
         self.q_kv_cache = kv_cache
         self.config = originalAttn.config
         self.hidden_size = originalAttn.hidden_size
@@ -273,25 +287,29 @@ class QQwen2Attention(nn.Module):
             originalAttn.q_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'q_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.k_proj = QLinearLayer(
             originalAttn.k_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'k_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'k_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.v_proj = QLinearLayer(
             originalAttn.v_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'v_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'v_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.o_proj = QLinearLayer(
             originalAttn.o_proj,
             select_num=select_nums[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'self_attn', 'o_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.rotary_emb = originalAttn.rotary_emb
 
@@ -332,6 +350,7 @@ class QQwen2Attention(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_in,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         torch.cuda.synchronize()
         
@@ -410,6 +429,7 @@ class QQwen2Attention(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_out,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
@@ -429,6 +449,8 @@ class QQwen2MLP(nn.Module):
         reorder_index,
         i,
         quant_type,
+        *,
+        reorder_xw: bool = True,
         use_x_mask: bool = False,
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
@@ -438,6 +460,7 @@ class QQwen2MLP(nn.Module):
         
         nameTemplate = 'layers.{}.{}.{}.{}'
         self.quant_type = quant_type
+        self.reorder_xw = bool(reorder_xw)
         self.x_mask_up = (
             XMaskSwitchTop2Hard(
                 originalMLP.up_proj.in_features,
@@ -463,20 +486,23 @@ class QQwen2MLP(nn.Module):
             select_num=select_nums[nameTemplate.format(i, 'mlp', 'gate_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'gate_proj', 'input')],
             out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.down_proj = QLinearLayer(
             originalMLP.down_proj,
             select_num=select_nums[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.up_proj = QLinearLayer(
             originalMLP.up_proj,
             select_num=select_nums[nameTemplate.format(i, 'mlp', 'up_proj', 'input')],
             reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'up_proj', 'input')],
             out_reorder_index=reorder_index[nameTemplate.format(i, 'mlp', 'down_proj', 'input')],
-            quant_type=quant_type
+            quant_type=quant_type,
+            reorder_xw=self.reorder_xw,
         )
         self.act_fn = originalMLP.act_fn
 
@@ -505,6 +531,7 @@ class QQwen2MLP(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_up,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         torch.cuda.synchronize()
         x = (qx, scale_x, scale, bsz, q_len)
@@ -523,6 +550,7 @@ class QQwen2MLP(nn.Module):
             self.quant_type,
             x_mask=self.x_mask_down,
             ste=torch.is_grad_enabled(),
+            reorder_xw=self.reorder_xw,
         )
         
         tmpResult = (qx, scale_x, scale, bsz, q_len)
