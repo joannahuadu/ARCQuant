@@ -284,7 +284,7 @@ def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
     orig_dtype = w.dtype 
     
     if dtype == "NVFP4":
-        scale = torch.max(w).to(torch.float32) / (448.0*6.0)
+        scale = torch.max(w.abs()).to(torch.float32) / (448.0*6.0)
         quantize_func = quantize_nvfp4_tensor
     elif dtype == "MXFP4":
         scale = torch.tensor(1.0, device=w.device, dtype=torch.float32)
@@ -311,7 +311,7 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4'):
     orig_dtype = x.dtype  
     
     if dtype == "NVFP4":
-        scale = torch.max(x).to(torch.float32) / (448.0*6.0)
+        scale = torch.max(x.abs()).to(torch.float32) / (448.0*6.0)
         quantize_func = quantize_nvfp4_tensor
     elif dtype == "MXFP4":
         scale = torch.tensor(1.0, device=x.device, dtype=torch.float32)

@@ -6,12 +6,6 @@ from parallel_utils import map_layers_to_multi_gpus
 from datautils import get_loaders
 from eval import *
 
-from lm_eval import tasks as lm_tasks
-from lm_eval import evaluator as lm_evaluator
-from lm_eval.tasks import TaskManager
-from lm_eval.utils import make_table
-from lm_eval.models.huggingface import HFLM
-
 import time
 
 from visualize import *
@@ -72,21 +66,17 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '--tasks', type=str, default=None,
-    )
+        '--tasks',
+        nargs='+',
+        default=["piqa", "hellaswag", "arc_easy", "arc_challenge", "winogrande", "lambada_openai"],
+        help='Tasks to evaluate on LM Eval.')
     parser.add_argument(
         "--eval_ppl", action="store_true",
         help='Whether to evaluate perplexity.'
     )
 
-    parser.add_argument(
-        "--lm_eval_num_fewshot", type=int, default=0, 
-        help="Number of shots in lm evaluation. Default is 0 for zero-shot."
-    )
-    parser.add_argument(
-        "--lm_eval_limit", type=int, default=-1, 
-        help="Limit the number of examples in lm evaluation"
-    )
+    parser.add_argument('--lm_eval_batch_size', type=int, default=128, help='Batch size for evaluation with lm eval harness.')
+    parser.add_argument('--num_fewshot', type=int, default=0, help='Number of few-shot examples for lm_eval.')
     parser.add_argument(
         "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"], 
         help="The calibration dataset to use."
@@ -147,68 +137,73 @@ if __name__ == '__main__':
     print(f"Quantized Type is: {args.quant_type} ")
     print(f"Total time taken: {end_time - start_time:.2f} seconds")
     bsz = "auto"
-    if args.tasks is not None:
-        if 'mmlu' in args.tasks :
-            bsz = 2
- 
-    from transformers import AutoTokenizer
-    lm = HFLM(model, batch_size=bsz)
-
-    lm.model.eval()
-    for param in lm.model.parameters():
-        param.requires_grad = False
-
-    # map_layers_to_multi_gpus(lm.model.model.layers)
-    # input_device = lm.model.model.layers[0].device
-    # output_device = lm.model.model.layers[-1].device
-    # assert input_device == output_device
-    # lm._device = input_device
-    # lm.model.model.embed_tokens.to(input_device)
-    # lm.model.model.norm.to(output_device)
-    # lm.model.lm_head.to(output_device)
-    lm._device = DEV
-    lm._model = lm._model.to(lm._device)
-
-        
+    
+    model.to(DEV)
+    
     if args.eval_ppl:
         datasets = ['wikitext2']
 
         for dataset in datasets:
-            dataloader, testloader = get_loaders(
+            dataloader, testloader, tokenizer = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=2048
             )
             print(f"Evaluating {dataset} ...")
-            ppl = eval_ppl(lm.model, testloader, 'cuda')
+            ppl = eval_ppl(model, testloader, 'cuda')
 
             print(f"Result,{dataset},{ppl:.3f}")
 
     
             
     if args.tasks is not None:
-        task_manager = TaskManager()
-        task_names = args.tasks.split(',')
+        import lm_eval
+        from lm_eval import utils as lm_eval_utils
+        from lm_eval.models.huggingface import HFLM
+        from lm_eval.tasks import initialize_tasks
+        initialize_tasks()
 
-        results = lm_evaluator.simple_evaluate(
-            lm,
+        hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+
+        task_names = lm_eval_utils.pattern_match(args.tasks, lm_eval.tasks.ALL_TASKS)
+        results = lm_eval.simple_evaluate(
+            hflm,
             tasks=task_names,
-            num_fewshot=args.lm_eval_num_fewshot,
-            limit=None if args.lm_eval_limit == -1 else args.lm_eval_limit,
-            batch_size=bsz
+            num_fewshot=args.num_fewshot,
+            batch_size=args.lm_eval_batch_size,
         )
 
-        table_results = make_table(results)
-        print(table_results)
-        import logging
-        from datetime import datetime
+        results_by_task = results.get("results", {})
+        print("\n" + "=" * 60)
+        print("Evaluation Results")
+        print("=" * 60)
+        for task, metrics in results_by_task.items():
+            print(f"\n{task}:")
+            for k, v in metrics.items():
+                if "stderr" not in k:
+                    print(f"  {k}: {v}")
 
-        if not os.path.exists("./results/"):
-            os.makedirs("./results/")
-        log_filename = f"./results/log_{model_name.lower()}_{args.tasks}_{datetime.now().strftime('%Y%m%d')}.log"
-        logging.basicConfig(
-                            filename=log_filename,
-                            level=logging.INFO,
-                            format='%(asctime)s - %(message)s',
-                            datefmt='%Y-%m-%d %H:%M:%S'
-                        )
-        logging.info(f"Results for {model_name.lower()} on {args.tasks}:\n{table_results}")
+        print("\n" + "=" * 60)
+        print("Summary")
+        print("=" * 60)
+        summary_metrics = {}
+        for task, metrics in results_by_task.items():
+            for k, v in metrics.items():
+                if "stderr" in k:
+                    continue
+                if k.endswith("/acc") or "acc" in k.lower():
+                    key = f"{task} {k}"
+                    summary_metrics[key] = v
+                    print(f"{key}: {v}")
+
+        if hasattr(args, "wandb") and args.wandb and summary_metrics:
+            import wandb
+            wandb.log(summary_metrics)
+
+        if args.output_file:
+            import json
+            from pathlib import Path
+            output_path = Path(args.output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open("w") as f:
+                json.dump(results_by_task, f, indent=2)
+            print(f"\nResults saved to {args.output_file}")
   

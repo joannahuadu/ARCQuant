@@ -25,7 +25,7 @@ def get_wikitext2(nsamples, seed, seqlen, model, tokenizer):
         tar = inp.clone()
         tar[:, :-1] = -100
         trainloader.append((inp, tar))
-    return trainloader, testenc
+    return trainloader, testenc, tokenizer
 
 def get_ptb(nsamples, seed, seqlen, model, tokenizer):
     from datasets import load_dataset
@@ -44,7 +44,7 @@ def get_ptb(nsamples, seed, seqlen, model, tokenizer):
         tar = inp.clone()
         tar[:, :-1] = -100
         trainloader.append((inp, tar))
-    return trainloader, testenc
+    return trainloader, testenc, tokenizer
 
 def get_c4(nsamples, seed, seqlen, model, tokenizer):
     from datasets import load_dataset
@@ -88,7 +88,7 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
             self.input_ids = input_ids
     valenc = TokenizerWrapper(valenc)
 
-    return trainloader, valenc 
+    return trainloader, valenc, tokenizer
 
 def get_ptb_new(nsamples, seed, seqlen, model, tokenizer):
     from datasets import load_dataset
@@ -107,7 +107,7 @@ def get_ptb_new(nsamples, seed, seqlen, model, tokenizer):
         tar = inp.clone()
         tar[:, :-1] = -100
         trainloader.append((inp, tar))
-    return trainloader, testenc
+    return trainloader, testenc, tokenizer
 
 def get_c4_new(nsamples, seed, seqlen, model, tokenizer):
     from datasets import load_dataset
@@ -142,7 +142,7 @@ def get_c4_new(nsamples, seed, seqlen, model, tokenizer):
             self.input_ids = input_ids
     valenc = TokenizerWrapper(valenc)
 
-    return trainloader, valenc
+    return trainloader, valenc, tokenizer
 
 
 def get_loaders(

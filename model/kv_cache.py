@@ -4,7 +4,7 @@ import math
 import torch
 import functools
 
-from optional_agemm import require_agemm
+from .optional_agemm import require_agemm
 
 def get_minq_maxq(bits: int, sym: bool):
     if sym:
