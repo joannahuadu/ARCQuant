@@ -17,7 +17,19 @@ from functools import partial
 import math
 
 
-def reorder_model_llama(model, device, kv_cache, reorder_index, select_nums, quant_type):
+def reorder_model_llama(
+    model,
+    device,
+    kv_cache,
+    reorder_index,
+    select_nums,
+    quant_type,
+    *,
+    use_x_mask: bool = False,
+    x_mask_tau: float = 1.0,
+    x_mask_alpha: float = 1.0,
+    x_mask_r_thr=None,
+):
     model.config.use_cache = False
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
@@ -31,7 +43,11 @@ def reorder_model_llama(model, device, kv_cache, reorder_index, select_nums, qua
                 select_nums=select_nums,
                 reorder_index=reorder_index,
                 layer_idx=i,
-                quant_type=quant_type
+                quant_type=quant_type,
+                use_x_mask=use_x_mask,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
             )
         elif isinstance(layers[i], QLlamaDecoderLayer):
             m = layers[i]
@@ -47,7 +63,19 @@ def reorder_model_llama(model, device, kv_cache, reorder_index, select_nums, qua
         torch.cuda.empty_cache()
     return model
 
-def reorder_model_qwen(model, device, kv_cache, reorder_index, select_nums, quant_type):
+def reorder_model_qwen(
+    model,
+    device,
+    kv_cache,
+    reorder_index,
+    select_nums,
+    quant_type,
+    *,
+    use_x_mask: bool = False,
+    x_mask_tau: float = 1.0,
+    x_mask_alpha: float = 1.0,
+    x_mask_r_thr=None,
+):
     model.config.use_cache = False
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
@@ -61,7 +89,11 @@ def reorder_model_qwen(model, device, kv_cache, reorder_index, select_nums, quan
                 select_nums=select_nums,
                 reorder_index=reorder_index,
                 layer_idx=i,
-                quant_type=quant_type
+                quant_type=quant_type,
+                use_x_mask=use_x_mask,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
             )
             
         nameTemplate = 'layers.{}.{}.{}.{}'
@@ -75,7 +107,19 @@ def reorder_model_qwen(model, device, kv_cache, reorder_index, select_nums, quan
         torch.cuda.empty_cache()
     return model
 
-def reorder_model_mixtral(model, device, kv_cache, reorder_index, select_nums, quant_type):
+def reorder_model_mixtral(
+    model,
+    device,
+    kv_cache,
+    reorder_index,
+    select_nums,
+    quant_type,
+    *,
+    use_x_mask: bool = False,
+    x_mask_tau: float = 1.0,
+    x_mask_alpha: float = 1.0,
+    x_mask_r_thr=None,
+):
     model.config.use_cache = False
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
@@ -89,7 +133,11 @@ def reorder_model_mixtral(model, device, kv_cache, reorder_index, select_nums, q
                 select_nums=select_nums,
                 reorder_index=reorder_index,
                 layer_idx=i,
-                quant_type=quant_type
+                quant_type=quant_type,
+                use_x_mask=use_x_mask,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
             )
         elif isinstance(layers[i], QMixtralDecoderLayer):
             m = layers[i]

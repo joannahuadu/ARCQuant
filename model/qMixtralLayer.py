@@ -8,6 +8,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralDecoderLayer, Mi
 from qLinearLayer import QLinearLayer
 from quantize import *
 from visualize import *
+from x_mask import XMaskSwitchTop2Hard
 import os
 from optional_agemm import HAS_AGEMM, require_agemm
 
@@ -77,12 +78,29 @@ def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
     qx, scale_x = require_agemm().reorder_quantize_x(x / scale, reorder_index, select_num)
     return qx, scale_x, scale
     
-def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
-    if quant_type == 'NVFP4' and HAS_AGEMM:
+def reorder_quantize_x(
+    x,
+    reorder_index,
+    select_num,
+    quant_type: str = "NVFP4",
+    *,
+    x_mask: Optional[nn.Module] = None,
+    ste: bool = False,
+):
+    if quant_type == "NVFP4" and HAS_AGEMM and x_mask is None and not ste:
         # return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
         return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
     index = reorder_index.to(torch.int32)
-    return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
+    x_reordered = torch.index_select(x, 1, index)
+    if x_mask is not None:
+        x_reordered = x_mask(x_reordered)
+    return fake_reorder_quantize_x(
+        x_reordered,
+        torch.arange(x.shape[-1], device=x.device),
+        select_num,
+        dtype=quant_type,
+        ste=ste,
+    )
 
 class QMixtralDecoderLayer(nn.Module):
     def __init__(
@@ -92,7 +110,11 @@ class QMixtralDecoderLayer(nn.Module):
         select_nums,
         reorder_index,
         layer_idx,
-        quant_type
+        quant_type,
+        use_x_mask: bool = False,
+        x_mask_tau: float = 1.0,
+        x_mask_alpha: float = 1.0,
+        x_mask_r_thr: Optional[float] = None,
     ):
         super().__init__()
        
@@ -103,7 +125,11 @@ class QMixtralDecoderLayer(nn.Module):
             select_nums=select_nums,
             reorder_index=reorder_index,
             i=layer_idx,
-            quant_type=quant_type
+            quant_type=quant_type,
+            use_x_mask=use_x_mask,
+            x_mask_tau=x_mask_tau,
+            x_mask_alpha=x_mask_alpha,
+            x_mask_r_thr=x_mask_r_thr,
         )
         # self.self_attn = originalLayer.self_attn
         self.block_sparse_moe = QMixtralSparseMoeBlock(
@@ -111,7 +137,11 @@ class QMixtralDecoderLayer(nn.Module):
             select_nums=select_nums,
             reorder_index=reorder_index,
             i=layer_idx,
-            quant_type=quant_type
+            quant_type=quant_type,
+            use_x_mask=use_x_mask,
+            x_mask_tau=x_mask_tau,
+            x_mask_alpha=x_mask_alpha,
+            x_mask_r_thr=x_mask_r_thr,
         )
         # self.mlp = originalLayer.mlp
         self.input_layernorm = QMixtralRMSNorm(
@@ -131,7 +161,6 @@ class QMixtralDecoderLayer(nn.Module):
         self.block_sparse_moe = self.block_sparse_moe.to(*args, **kwargs)
         return self
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -192,7 +221,6 @@ class QMixtralRMSNorm(nn.Module):
     
 
        
-    @torch.no_grad()
     def forward(self, hidden_states):
         result = self.originalNorm(hidden_states)
             
@@ -218,7 +246,11 @@ class QMixtralAttention(nn.Module):
         select_nums,
         reorder_index,
         i,
-        quant_type
+        quant_type,
+        use_x_mask: bool = False,
+        x_mask_tau: float = 1.0,
+        x_mask_alpha: float = 1.0,
+        x_mask_r_thr: Optional[float] = None,
     ):
         super().__init__()
 
@@ -227,6 +259,20 @@ class QMixtralAttention(nn.Module):
         self.q_kv_cache = kv_cache
         self.config = originalAttn.config
         self.hidden_size = originalAttn.hidden_size
+        self.x_mask_in = (
+            XMaskSwitchTop2Hard(
+                self.hidden_size, x_mask_tau=x_mask_tau, x_mask_alpha=x_mask_alpha, x_mask_r_thr=x_mask_r_thr
+            )
+            if use_x_mask
+            else None
+        )
+        self.x_mask_out = (
+            XMaskSwitchTop2Hard(
+                self.hidden_size, x_mask_tau=x_mask_tau, x_mask_alpha=x_mask_alpha, x_mask_r_thr=x_mask_r_thr
+            )
+            if use_x_mask
+            else None
+        )
         self.num_heads = originalAttn.num_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = originalAttn.num_key_value_heads
@@ -286,7 +332,6 @@ class QMixtralAttention(nn.Module):
       
         return self
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states,
@@ -302,9 +347,18 @@ class QMixtralAttention(nn.Module):
 
         bsz, q_len, _ = hidden_states.size()
         
-        hidden_states = hidden_states.reshape(bsz*q_len, -1).contiguous().detach()
+        hidden_states = hidden_states.reshape(bsz * q_len, -1).contiguous()
+        if not torch.is_grad_enabled():
+            hidden_states = hidden_states.detach()
         
-        qx, scale_x, scale = reorder_quantize_x(hidden_states, self.q_reorder_index, self.q_proj.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(
+            hidden_states,
+            self.q_reorder_index,
+            self.q_proj.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_in,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         
         hidden_states = (qx, scale_x, scale, bsz, q_len)
@@ -370,9 +424,18 @@ class QMixtralAttention(nn.Module):
         
         # Quantize the attention output
       
-        attn_output = attn_output.reshape(bsz*q_len, -1).contiguous().detach()
+        attn_output = attn_output.reshape(bsz * q_len, -1).contiguous()
+        if not torch.is_grad_enabled():
+            attn_output = attn_output.detach()
 
-        qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(
+            attn_output,
+            self.o_reorder_index,
+            self.o_proj.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_out,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
         attn_output = self.o_proj(attn_output)
@@ -400,7 +463,11 @@ class QMixtralSparseMoeBlock(nn.Module):
         select_nums,
         reorder_index,
         i,
-        quant_type
+        quant_type,
+        use_x_mask: bool = False,
+        x_mask_tau: float = 1.0,
+        x_mask_alpha: float = 1.0,
+        x_mask_r_thr: Optional[float] = None,
     ):
         super().__init__()
         self.hidden_dim = originalSparseMoeBlock.hidden_dim
@@ -416,7 +483,18 @@ class QMixtralSparseMoeBlock(nn.Module):
         self.experts = originalSparseMoeBlock.experts
 
         for j in range(self.num_experts):
-            self.experts[j] = QMixtralBlockSparseTop2MLP(originalSparseMoeBlock.experts[j], select_nums, reorder_index, i, j, quant_type)
+            self.experts[j] = QMixtralBlockSparseTop2MLP(
+                originalSparseMoeBlock.experts[j],
+                select_nums,
+                reorder_index,
+                i,
+                j,
+                quant_type,
+                use_x_mask=use_x_mask,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
+            )
 
         # Jitter parameters
         # self.jitter_noise = originalSparseMoeBlock.router_jitter_noise
@@ -476,7 +554,11 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
                 reorder_index,
                 layer_idx,
                 moe_idx,
-                quant_type
+                quant_type,
+                use_x_mask: bool = False,
+                x_mask_tau: float = 1.0,
+                x_mask_alpha: float = 1.0,
+                x_mask_r_thr: Optional[float] = None,
             ):
         super().__init__()
         self.ffn_dim = originalBlock.ffn_dim
@@ -484,6 +566,26 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
 
         nameTemplate = 'layers.{}.{}.{}.{}.{}.{}'
         self.quant_type = quant_type
+        self.x_mask_up = (
+            XMaskSwitchTop2Hard(
+                originalBlock.w1.in_features,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
+            )
+            if use_x_mask
+            else None
+        )
+        self.x_mask_down = (
+            XMaskSwitchTop2Hard(
+                originalBlock.w2.in_features,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
+            )
+            if use_x_mask
+            else None
+        )
         self.w1 = QLinearLayer(
             originalBlock.w1,
             select_num=select_nums[nameTemplate.format(layer_idx, 'block_sparse_moe', 'experts', moe_idx, 'w1', 'input')],
@@ -517,14 +619,20 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
         
         return self
 
-    @torch.no_grad()
     def forward(self, x):
         # input X: [b, seq, dim]: quantized
         q_len, _ = x.shape
         # print(f"x = {x.shape}")
         # x = x.reshape(bsz*q_len, -1).contiguous().detach()
 
-        qx, scale_x, scale = reorder_quantize_x(x, self.w1_reorder_index, self.w1.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(
+            x,
+            self.w1_reorder_index,
+            self.w1.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_up,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         x = (qx, scale_x, scale, None, q_len)
         # print(f"qx = {qx.shape}")
@@ -533,7 +641,14 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
         # bsz, q_len, _ = tmpResult.shape
         # tmpResult = tmpResult.reshape(bsz*q_len, -1).contiguous().detach()
 
-        qx, scale_x, scale = reorder_quantize_x(tmpResult, self.w2_reorder_index, self.w2.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(
+            tmpResult,
+            self.w2_reorder_index,
+            self.w2.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_down,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         tmpResult = (qx, scale_x, scale, None, q_len)
        

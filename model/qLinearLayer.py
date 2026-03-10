@@ -79,7 +79,6 @@ class QLinearLayer(nn.Module):
         del reorder_index
         torch.cuda.empty_cache()
 
-    @torch.no_grad()
     def forward(self, x):
         qx, scale_x, scale, bsz, q_len = x
 

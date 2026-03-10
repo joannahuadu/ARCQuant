@@ -6,6 +6,7 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMS
 from qLinearLayer import QLinearLayer
 from quantize import *
 from visualize import *
+from x_mask import XMaskSwitchTop2Hard
 import os
 from optional_agemm import HAS_AGEMM, require_agemm
 
@@ -74,13 +75,33 @@ def NVFP4_reorder_quantize_x(x, reorder_index, select_num):
     qx, scale_x = require_agemm().reorder_quantize_x(x / scale, reorder_index, select_num)
     return qx, scale_x, scale
 
-def reorder_quantize_x(x, reorder_index, select_num, quant_type='NVFP4'):
-    if quant_type == 'NVFP4' and HAS_AGEMM:
-        return NVFP4_reorder_quantize_x(x, torch.arange(reorder_index.shape[0]).to(torch.int16).cuda(), 0)
+def reorder_quantize_x(
+    x,
+    reorder_index,
+    select_num,
+    quant_type: str = "NVFP4",
+    *,
+    x_mask: Optional[nn.Module] = None,
+    ste: bool = False,
+):
+    # If we need x_mask or gradients, fall back to the (differentiable via STE) fake path.
+    if quant_type == "NVFP4" and HAS_AGEMM and x_mask is None and not ste:
+        return NVFP4_reorder_quantize_x(
+            x, torch.arange(reorder_index.shape[0], device=x.device, dtype=torch.int16), 0
+        )
         # return NVFP4_reorder_quantize_x(x, reorder_index, select_num)
+
     index = reorder_index.to(torch.int32)
-    # return fake_reorder_quantize_x((x), torch.arange(x.shape[-1]), 0, dtype=quant_type)
-    return fake_reorder_quantize_x(torch.index_select(x, 1, index), torch.arange(x.shape[-1]), select_num, dtype=quant_type)
+    x_reordered = torch.index_select(x, 1, index)
+    if x_mask is not None:
+        x_reordered = x_mask(x_reordered)
+    return fake_reorder_quantize_x(
+        x_reordered,
+        torch.arange(x.shape[-1], device=x.device),
+        select_num,
+        dtype=quant_type,
+        ste=ste,
+    )
 
 class QLlamaDecoderLayer(nn.Module):
     def __init__(
@@ -91,6 +112,10 @@ class QLlamaDecoderLayer(nn.Module):
         reorder_index,
         layer_idx,
         quant_type,
+        use_x_mask: bool = False,
+        x_mask_tau: float = 1.0,
+        x_mask_alpha: float = 1.0,
+        x_mask_r_thr: Optional[float] = None,
     ):
         super().__init__()
        
@@ -101,7 +126,11 @@ class QLlamaDecoderLayer(nn.Module):
             select_nums=select_nums,
             reorder_index=reorder_index,
             i=layer_idx,
-            quant_type=quant_type
+            quant_type=quant_type,
+            use_x_mask=use_x_mask,
+            x_mask_tau=x_mask_tau,
+            x_mask_alpha=x_mask_alpha,
+            x_mask_r_thr=x_mask_r_thr,
         )
         # self.self_attn = originalLayer.self_attn
         self.mlp = QLlamaMLP(
@@ -109,7 +138,11 @@ class QLlamaDecoderLayer(nn.Module):
             select_nums=select_nums,
             reorder_index=reorder_index,
             i=layer_idx,
-            quant_type=quant_type
+            quant_type=quant_type,
+            use_x_mask=use_x_mask,
+            x_mask_tau=x_mask_tau,
+            x_mask_alpha=x_mask_alpha,
+            x_mask_r_thr=x_mask_r_thr,
         )
         # self.mlp = originalLayer.mlp
         self.input_layernorm = QLlamaRMSNorm(
@@ -129,7 +162,6 @@ class QLlamaDecoderLayer(nn.Module):
         self.mlp = self.mlp.to(*args, **kwargs)
         return self
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -186,7 +218,6 @@ class QLlamaRMSNorm(nn.Module):
     
 
        
-    @torch.no_grad()
     def forward(self, hidden_states):
         result = self.originalNorm(hidden_states)
             
@@ -211,7 +242,11 @@ class QLlamaAttention(nn.Module):
         select_nums,
         reorder_index,
         i,
-        quant_type
+        quant_type,
+        use_x_mask: bool = False,
+        x_mask_tau: float = 1.0,
+        x_mask_alpha: float = 1.0,
+        x_mask_r_thr: Optional[float] = None,
     ):
         super().__init__()
         self.q_kv_cache = kv_cache
@@ -225,6 +260,20 @@ class QLlamaAttention(nn.Module):
         self.rope_theta = originalAttn.rope_theta
         self.layer_idx = i
         self.quant_type = quant_type
+        self.x_mask_in = (
+            XMaskSwitchTop2Hard(
+                self.hidden_size, x_mask_tau=x_mask_tau, x_mask_alpha=x_mask_alpha, x_mask_r_thr=x_mask_r_thr
+            )
+            if use_x_mask
+            else None
+        )
+        self.x_mask_out = (
+            XMaskSwitchTop2Hard(
+                self.hidden_size, x_mask_tau=x_mask_tau, x_mask_alpha=x_mask_alpha, x_mask_r_thr=x_mask_r_thr
+            )
+            if use_x_mask
+            else None
+        )
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -274,7 +323,6 @@ class QLlamaAttention(nn.Module):
       
         return self
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states,
@@ -290,8 +338,17 @@ class QLlamaAttention(nn.Module):
 
         bsz, q_len, _ = hidden_states.size()
         
-        hidden_states = hidden_states.reshape(bsz*q_len, -1).contiguous().detach()
-        qx, scale_x, scale = reorder_quantize_x(hidden_states, self.q_reorder_index, self.q_proj.select_num, self.quant_type)
+        hidden_states = hidden_states.reshape(bsz * q_len, -1).contiguous()
+        if not torch.is_grad_enabled():
+            hidden_states = hidden_states.detach()
+        qx, scale_x, scale = reorder_quantize_x(
+            hidden_states,
+            self.q_reorder_index,
+            self.q_proj.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_in,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         
         hidden_states = (qx, scale_x, scale, bsz, q_len)
@@ -355,10 +412,19 @@ class QLlamaAttention(nn.Module):
         
         # Quantize the attention output
       
-        attn_output = attn_output.reshape(bsz*q_len, -1).contiguous().detach()
+        attn_output = attn_output.reshape(bsz * q_len, -1).contiguous()
+        if not torch.is_grad_enabled():
+            attn_output = attn_output.detach()
 
 
-        qx, scale_x, scale = reorder_quantize_x(attn_output, self.o_reorder_index, self.o_proj.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(
+            attn_output,
+            self.o_reorder_index,
+            self.o_proj.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_out,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
         attn_output = self.o_proj(attn_output)
@@ -376,12 +442,36 @@ class QLlamaMLP(nn.Module):
         select_nums,
         reorder_index,
         i,
-        quant_type
+        quant_type,
+        use_x_mask: bool = False,
+        x_mask_tau: float = 1.0,
+        x_mask_alpha: float = 1.0,
+        x_mask_r_thr: Optional[float] = None,
     ):
         super().__init__()
         nameTemplate = 'layers.{}.{}.{}.{}'
 
         self.quant_type = quant_type
+        self.x_mask_up = (
+            XMaskSwitchTop2Hard(
+                originalMLP.up_proj.in_features,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
+            )
+            if use_x_mask
+            else None
+        )
+        self.x_mask_down = (
+            XMaskSwitchTop2Hard(
+                originalMLP.down_proj.in_features,
+                x_mask_tau=x_mask_tau,
+                x_mask_alpha=x_mask_alpha,
+                x_mask_r_thr=x_mask_r_thr,
+            )
+            if use_x_mask
+            else None
+        )
         
         self.gate_proj = QLinearLayer(
             originalMLP.gate_proj,
@@ -416,24 +506,41 @@ class QLlamaMLP(nn.Module):
 
         return self
 
-    @torch.no_grad()
     def forward(self, x):
         # input X: [b, seq, dim]: quantized
 
         bsz, q_len, _ = x.shape
-        x = x.reshape(bsz*q_len, -1).contiguous().detach()
+        x = x.reshape(bsz * q_len, -1).contiguous()
+        if not torch.is_grad_enabled():
+            x = x.detach()
 
-        qx, scale_x, scale = reorder_quantize_x(x, self.up_reorder_index, self.up_proj.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(
+            x,
+            self.up_reorder_index,
+            self.up_proj.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_up,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         x = (qx, scale_x, scale, bsz, q_len)
         tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
         # Quantize the activations and feed into down_proj
 
         bsz, q_len, _ = tmpResult.shape
-        tmpResult = tmpResult.reshape(bsz*q_len, -1).contiguous().detach()
+        tmpResult = tmpResult.reshape(bsz * q_len, -1).contiguous()
+        if not torch.is_grad_enabled():
+            tmpResult = tmpResult.detach()
         
 
-        qx, scale_x, scale = reorder_quantize_x(tmpResult, self.down_reorder_index, self.down_proj.select_num, self.quant_type)
+        qx, scale_x, scale = reorder_quantize_x(
+            tmpResult,
+            self.down_reorder_index,
+            self.down_proj.select_num,
+            self.quant_type,
+            x_mask=self.x_mask_down,
+            ste=torch.is_grad_enabled(),
+        )
         torch.cuda.synchronize()
         tmpResult = (qx, scale_x, scale, bsz, q_len)
        
