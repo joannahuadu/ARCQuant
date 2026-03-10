@@ -80,8 +80,8 @@ if __name__ == '__main__':
         "--eval_ppl", action="store_true",
         help='Whether to evaluate perplexity.'
     )
-
-    parser.add_argument('--lm_eval_batch_size', type=int, default=128, help='Batch size for evaluation with lm eval harness.')
+    parser.add_argument('--output_file', type=str, default=None, help='Optional path to save lm_eval results as JSON.')
+    parser.add_argument('--lm_eval_batch_size', type=int, default=16, help='Batch size for evaluation with lm eval harness.')
     parser.add_argument('--num_fewshot', type=int, default=0, help='Number of few-shot examples for lm_eval.')
     parser.add_argument(
         "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"], 
@@ -204,7 +204,7 @@ if __name__ == '__main__':
                 dataset, seed=args.seed, model=args.model, seqlen=2048
             )
             print(f"Evaluating {dataset} ...")
-            ppl = eval_ppl(model, testloader, 'cuda')
+            ppl = eval_ppl(model, testloader)
 
             print(f"Result,{dataset},{ppl:.3f}")
 
