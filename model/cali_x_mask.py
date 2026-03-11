@@ -420,8 +420,7 @@ def main():
         del layer
         torch.cuda.empty_cache()
 
-    out_path = f"./saved/{model_name.lower()}_xmask_{dataset_name}_{args.act_sort_metric}_{args.quant_type}.pt"
-    os.makedirs("./saved", exist_ok=True)
+    out_path = os.path.join(args.exp_dir, f"{model_name.lower()}_xmask_{dataset_name}_{args.act_sort_metric}_{args.quant_type}.pt")
     torch.save(
         {
             "meta": {
