@@ -296,6 +296,8 @@ def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
         scale = torch.tensor(1.0, device=w.device, dtype=torch.float32)
         quantize_func = quantize_int4_tensor
     
+    index = reorder_index.to(torch.int32)
+    w = torch.index_select(w, 1, index)
     w_fp32 = w.to(torch.float32) / scale
     scale_w = w_fp32.abs().max(dim=1, keepdim=True)[0]
     
@@ -303,8 +305,12 @@ def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
         q_w = quantize_func(w_fp32) * scale
         return q_w.to(orig_dtype), (scale_w * scale).to(orig_dtype), scale.to(orig_dtype)
     else:
-        topk_index = reorder_index[-select_num:]
-        q_w = torch.cat([quantize_func(w_fp32), quantize_func(w_fp32[:, topk_index])], dim=1) * scale
+        topk_index = torch.arange(w.shape[-1], device=w.device)[-select_num:]
+        q_w = quantize_func(w_fp32)
+        inv_index = torch.empty_like(index)
+        inv_index[index] = torch.arange(index.numel(), device=index.device)
+        q_w = torch.index_select(q_w, 1, inv_index)
+        q_w = torch.cat([q_w, quantize_func(w_fp32[:, topk_index])], dim=1) * scale
         return q_w.to(orig_dtype), (scale_w * scale).to(orig_dtype), scale.to(orig_dtype)
 
 def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4', *, ste: bool = False):
@@ -323,6 +329,8 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4', *, ste:
         scale = torch.tensor(1.0, device=x.device, dtype=torch.float32)
         quantize_func = quantize_int4_tensor
     
+    index = reorder_index.to(torch.int32)
+    x = torch.index_select(x, 1, index)
     x_fp32 = x.to(torch.float32) / scale
     scale_x = x_fp32.abs().max(dim=1, keepdim=True)[0]
     
@@ -333,11 +341,13 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4', *, ste:
             q_x = x + (q_x - x).detach()
         return q_x, scale_x.to(orig_dtype), scale.to(orig_dtype)
     else:
-        topk_index = reorder_index[-select_num:]
+        topk_index = torch.arange(x.shape[-1], device=x.device)[-select_num:]
         q_x = quantize_func(x_fp32)
         error_e = x_fp32 - q_x
         q_error_k = quantize_func(error_e[:, topk_index])
-        
+        inv_index = torch.empty_like(index)
+        inv_index[index] = torch.arange(index.numel(), device=index.device)
+        q_x = torch.index_select(q_x, 1, inv_index)
         ret_x = torch.cat([q_x, q_error_k], dim=1) * scale
         ret_x = ret_x.to(orig_dtype)
         if ste:
