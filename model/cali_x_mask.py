@@ -5,11 +5,41 @@ from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
-
+import logging
+from termcolor import colored
+from datetime import datetime
+import pprint
 from datautils import DEV, get_loaders
 from model_utils import reorder_model_llama, reorder_model_mixtral, reorder_model_qwen
 from x_mask_utils import iter_layer_x_mask_modules, set_layer_x_mask_alpha, set_layer_x_mask_eval_mode, configure_x_mask_token_gate
 
+def create_logger(exp_dir, dist_rank=0, name=''):
+    # create logger
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # create formatter
+    fmt = '[%(asctime)s %(name)s] (%(filename)s %(lineno)d): %(levelname)s %(message)s'
+    color_fmt = colored('[%(asctime)s %(name)s]', 'green') + \
+                colored('(%(filename)s %(lineno)d)', 'yellow') + ': %(levelname)s %(message)s'
+
+    # create console handlers for master process
+    if dist_rank == 0:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(
+            logging.Formatter(fmt=color_fmt, datefmt='%Y-%m-%d %H:%M:%S'))
+        logger.addHandler(console_handler)
+
+    # create file handlers
+    log_file = os.path.join(exp_dir, f'log_rank{dist_rank}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
+    file_handler = logging.FileHandler(log_file, mode='a')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(fmt=fmt, datefmt='%Y-%m-%d %H:%M:%S'))
+    logger.addHandler(file_handler)
+
+    return logger
 
 def _get_model(model_path: str):
     model_path_l = model_path.lower()
@@ -72,7 +102,8 @@ def main():
         default="NVFP4",
         choices=["NVFP4", "MXFP4", "INT4", "HiF4"],
     )
-
+    parser.add_argument("--output_dir", type=str, default="./outputs", help="Output directory path.")
+    parser.add_argument("--exp_name", type=str, default="exp", help="Experiment name.")
     # x-mask config
     parser.add_argument("--x_mask_tau", type=float, default=1.0)
     parser.add_argument("--x_mask_alpha", type=float, default=1.0)
@@ -84,6 +115,11 @@ def main():
         type=str,
         default="token_all",
         choices=["static_all", "token_all", "token_deep"],
+    )
+    parser.add_argument(
+        "--no_xw_reorder",
+        action="store_true",
+        help="Disable channel reordering for both activations (X) and weights (W).",
     )
     parser.add_argument("--x_mask_token_gate_deep_ratio", type=float, default=0.5)
     parser.add_argument("--x_mask_token_gate_deep_start", type=int, default=-1)
@@ -109,7 +145,16 @@ def main():
     parser.add_argument("--deactive_amp", action="store_true")
 
     args = parser.parse_args()
-
+    
+    args.exp_name = f"{args.exp_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    args.model_name = args.model.split("/")[-1]
+    args.exp_dir = os.path.join(args.output_dir, args.model_name, f"{args.quant_type}", args.exp_name)
+    os.makedirs(args.exp_dir, exist_ok=True)
+    logger = create_logger(args.exp_dir)
+    logger.info('Arguments: ')
+    logger.info(pprint.pformat(vars(args)))
+    logger.info('--' * 30)
+    
     model_name = _model_name_from_path(args.model)
     dataset_name = args.dataset.lower()
 
@@ -137,6 +182,7 @@ def main():
         reorder_index=reorder_index,
         select_nums=select_nums,
         quant_type=args.quant_type,
+        reorder_xw=not bool(args.no_xw_reorder),
         use_x_mask=True,
         x_mask_tau=float(args.x_mask_tau),
         x_mask_alpha=float(args.x_mask_alpha),
@@ -169,7 +215,7 @@ def main():
     )
 
     print("Catching first-layer inputs...")
-    trainloader, _ = get_loaders(
+    trainloader, _, _ = get_loaders(
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=args.seqlen
     )
 
@@ -289,6 +335,7 @@ def main():
 
         if optimizer is not None:
             for epoch in range(int(args.epochs)):
+                mse = 0
                 for start in range(0, args.nsamples, args.cali_bsz):
                     x = fp_inps[start : start + args.cali_bsz]
                     y_ref = fp_outs[start : start + args.cali_bsz]
@@ -322,10 +369,43 @@ def main():
                                     delta_l2 = d if delta_l2 is None else delta_l2 + d
                             if delta_l2 is not None:
                                 loss = loss + float(args.token_delta_l2) * delta_l2
-
+                    mse += loss.detach().cpu()
+                    loss = loss / loss.clone().detach().clamp_min(1e-12)
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     optimizer.step()
+                
+                cur_lr = optimizer.param_groups[0]["lr"] if len(optimizer.param_groups) > 0 else float("nan")
+                logger.info(f"layer {layer_idx} lwc lac iter {epoch}, lr {cur_lr:.8f}, mse: {mse:.8f}" )
+                if (
+                    (getattr(args, "trainable_gate", False) or getattr(args, "trainable_token_gate", False))
+                ):
+                    stats_parts = []
+                    for name, mask in (
+                        ("self_attn.x_mask_in", layer.self_attn.x_mask_in),
+                        ("self_attn.x_mask_out", layer.self_attn.x_mask_out),
+                        ("mlp.x_mask_up", layer.mlp.x_mask_up),
+                        ("mlp.x_mask_down", layer.mlp.x_mask_down),
+                    ):
+                        if mask is None or not getattr(mask, "use_x_mask", False):
+                            continue
+                        mean = getattr(mask, "_last_x_mask_gate_mean", None)
+                        if mean is None:
+                            continue
+                        std = getattr(mask, "_last_x_mask_gate_std", None)
+                        frac_low = getattr(mask, "_last_x_mask_gate_frac_low", None)
+                        frac_high = getattr(mask, "_last_x_mask_gate_frac_high", None)
+                        tok_var = getattr(mask, "_last_x_mask_gate_tok_var", None)
+                        delta_l2 = getattr(mask, "_last_x_mask_gate_delta_l2", None)
+                        stats_parts.append(
+                            f"{name}: mean={float(mean):.3f} std={float(std) if std is not None else float('nan'):.3f} "
+                            f"low={float(frac_low) if frac_low is not None else float('nan'):.3f} "
+                            f"high={float(frac_high) if frac_high is not None else float('nan'):.3f} "
+                            f"tok_var={float(tok_var) if tok_var is not None else float('nan'):.3e} "
+                            f"delta_l2={float(delta_l2) if delta_l2 is not None else float('nan'):.3e}"
+                        )
+                    if stats_parts:
+                        logger.info("x_mask_gate_stats: " + " | ".join(stats_parts))
 
         # ---- save layer x-mask params ----
         layer_xmask_state = {

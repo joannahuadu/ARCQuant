@@ -17,3 +17,4 @@ log.txt
 __pycache__/
 **/.vscode/
 **/.ipynb_checkpoints/
+outputs/*
