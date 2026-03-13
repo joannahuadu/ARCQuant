@@ -59,7 +59,9 @@ class QLinearLayer(nn.Module):
 
         if self.use_agemm:
             # self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w((originalLayer.weight.data), torch.arange(self.in_features).to(torch.int16).cuda(), 0)
-            self.W, self.scale_w, self.scale = NVFP4_reorder_quantize_w((originalLayer.weight.data), reorder_index.to(torch.int16).cuda(), select_num)
+            W, scale_w, scale = NVFP4_reorder_quantize_w(
+                (originalLayer.weight.data), reorder_index.to(torch.int16).cuda(), select_num
+            )
         else:
             if self.quant_type == "NVFP4" and not HAS_AGEMM:
                 reason = (
@@ -77,13 +79,16 @@ class QLinearLayer(nn.Module):
             else:
                 w_reordered = originalLayer.weight.data
                 fake_reorder_index = reorder_index.to(device=w_reordered.device, dtype=torch.long)
-            self.W, self.scale_w, self.scale = fake_reorder_quantize_w(
+            W, scale_w, scale = fake_reorder_quantize_w(
                 w_reordered,
                 fake_reorder_index,
                 select_num,
                 dtype=self.quant_type,
             )
         
+        self.register_buffer("W", W, persistent=False)
+        self.register_buffer("scale_w", scale_w, persistent=False)
+        self.register_buffer("scale", scale, persistent=False)
         reorder_index.cpu()
         del reorder_index
         torch.cuda.empty_cache()
