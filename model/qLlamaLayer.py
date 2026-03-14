@@ -98,13 +98,20 @@ def reorder_quantize_x(
         fake_reorder_index = reorder_index.to(device=x.device, dtype=torch.long)
 
     if x_mask is not None:
+        if select_num > 0:
+            x_rec_index = fake_reorder_index[-select_num:]
+            # Preserve the reconstruction channels before x-mask modifies them.
+            x_mask._last_x_rec = x_reordered[:, x_rec_index].detach()
+            x_mask._last_x_rec_index = x_rec_index.detach().clone()
         x_reordered = x_mask(x_reordered)
+    x_rec = getattr(x_mask, "_last_x_rec", None) if x_mask is not None else None
     return fake_reorder_quantize_x(
         x_reordered,
         fake_reorder_index,
         select_num,
         dtype=quant_type,
         ste=ste,
+        x_rec=x_rec,
     )
 
 class QLlamaDecoderLayer(nn.Module):
