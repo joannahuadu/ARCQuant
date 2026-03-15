@@ -30,6 +30,7 @@ def reorder_model_llama(
     x_mask_tau: float = 1.0,
     x_mask_alpha: float = 1.0,
     x_mask_r_thr=None,
+    rec: bool = False,
 ):
     model.config.use_cache = False
     layers = model.model.layers
@@ -50,6 +51,7 @@ def reorder_model_llama(
                 x_mask_tau=x_mask_tau,
                 x_mask_alpha=x_mask_alpha,
                 x_mask_r_thr=x_mask_r_thr,
+                rec=rec,
             )
         elif isinstance(layers[i], QLlamaDecoderLayer):
             m = layers[i]

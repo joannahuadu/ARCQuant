@@ -122,6 +122,11 @@ if __name__ == '__main__':
         action="store_true",
         help="Set x-mask modules to eval-hard mode (enforce 2:4 sparsity when r<thr).",
     )
+    parser.add_argument(
+        "--rec",
+        action="store_true",
+        help="Preserve pre-mask reconstruction channels for x_rec when x-mask is enabled.",
+    )
   
     
     args = parser.parse_args()
@@ -162,18 +167,23 @@ if __name__ == '__main__':
     torch.cuda.reset_max_memory_allocated()
     print("Reordering model...")
     start_time=time.time()
+    reorder_kwargs = {
+        "device": DEV,
+        "kv_cache": args.kv_cache,
+        "reorder_index": reorder_index,
+        "select_nums": select_nums,
+        "quant_type": args.quant_type,
+        "reorder_xw": not bool(args.no_xw_reorder),
+        "use_x_mask": bool(args.use_x_mask),
+        "x_mask_tau": float(args.x_mask_tau),
+        "x_mask_alpha": float(args.x_mask_alpha),
+        "x_mask_r_thr": None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr),
+    }
+    if "llama" in args.model.lower():
+        reorder_kwargs["rec"] = bool(args.rec)
     model = reorder_model_func(
         model,
-        device=DEV,
-        kv_cache=args.kv_cache,
-        reorder_index=reorder_index,
-        select_nums=select_nums,
-        quant_type=args.quant_type,
-        reorder_xw=not bool(args.no_xw_reorder),
-        use_x_mask=bool(args.use_x_mask),
-        x_mask_tau=float(args.x_mask_tau),
-        x_mask_alpha=float(args.x_mask_alpha),
-        x_mask_r_thr=None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr),
+        **reorder_kwargs,
     )
     end_time=time.time()
     peak_memory = torch.cuda.max_memory_allocated()

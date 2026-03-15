@@ -84,6 +84,7 @@ def reorder_quantize_x(
     x_mask: Optional[nn.Module] = None,
     ste: bool = False,
     reorder_xw: bool = True,
+    rec: bool = False,
 ):
     # If we need x_mask or gradients, fall back to the (differentiable via STE) fake path.
     if reorder_xw and quant_type == "NVFP4" and HAS_AGEMM and x_mask is None and not ste:
@@ -99,10 +100,14 @@ def reorder_quantize_x(
 
     if x_mask is not None:
         if select_num > 0:
-            x_rec_index = fake_reorder_index[-select_num:]
-            # Preserve the reconstruction channels before x-mask modifies them.
-            x_mask._last_x_rec = x_reordered[:, x_rec_index].detach()
-            x_mask._last_x_rec_index = x_rec_index.detach().clone()
+            if rec:
+                x_rec_index = fake_reorder_index[-select_num:]
+                # Preserve the reconstruction channels before x-mask modifies them.
+                x_mask._last_x_rec = x_reordered[:, x_rec_index].detach()
+                x_mask._last_x_rec_index = x_rec_index.detach().clone()
+            else:
+                x_mask._last_x_rec = None
+                x_mask._last_x_rec_index = None
         x_reordered = x_mask(x_reordered)
     x_rec = getattr(x_mask, "_last_x_rec", None) if x_mask is not None else None
     return fake_reorder_quantize_x(
@@ -129,6 +134,7 @@ class QLlamaDecoderLayer(nn.Module):
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
         x_mask_r_thr: Optional[float] = None,
+        rec: bool = False,
     ):
         super().__init__()
        
@@ -145,6 +151,7 @@ class QLlamaDecoderLayer(nn.Module):
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
             x_mask_r_thr=x_mask_r_thr,
+            rec=rec,
         )
         # self.self_attn = originalLayer.self_attn
         self.mlp = QLlamaMLP(
@@ -158,6 +165,7 @@ class QLlamaDecoderLayer(nn.Module):
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
             x_mask_r_thr=x_mask_r_thr,
+            rec=rec,
         )
         # self.mlp = originalLayer.mlp
         self.input_layernorm = QLlamaRMSNorm(
@@ -264,6 +272,7 @@ class QLlamaAttention(nn.Module):
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
         x_mask_r_thr: Optional[float] = None,
+        rec: bool = False,
     ):
         super().__init__()
         self.q_kv_cache = kv_cache
@@ -278,6 +287,7 @@ class QLlamaAttention(nn.Module):
         self.layer_idx = i
         self.quant_type = quant_type
         self.reorder_xw = bool(reorder_xw)
+        self.rec = bool(rec)
         self.x_mask_in = (
             XMaskSwitchTop2Hard(
                 self.hidden_size, x_mask_tau=x_mask_tau, x_mask_alpha=x_mask_alpha, x_mask_r_thr=x_mask_r_thr
@@ -371,6 +381,7 @@ class QLlamaAttention(nn.Module):
             x_mask=self.x_mask_in,
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
+            rec=self.rec,
         )
         torch.cuda.synchronize()
         
@@ -448,6 +459,7 @@ class QLlamaAttention(nn.Module):
             x_mask=self.x_mask_out,
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
+            rec=self.rec,
         )
         torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
@@ -473,12 +485,14 @@ class QLlamaMLP(nn.Module):
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
         x_mask_r_thr: Optional[float] = None,
+        rec: bool = False,
     ):
         super().__init__()
         nameTemplate = 'layers.{}.{}.{}.{}'
 
         self.quant_type = quant_type
         self.reorder_xw = bool(reorder_xw)
+        self.rec = bool(rec)
         self.x_mask_up = (
             XMaskSwitchTop2Hard(
                 originalMLP.up_proj.in_features,
@@ -552,6 +566,7 @@ class QLlamaMLP(nn.Module):
             x_mask=self.x_mask_up,
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
+            rec=self.rec,
         )
         torch.cuda.synchronize()
         x = (qx, scale_x, scale, bsz, q_len)
@@ -572,6 +587,7 @@ class QLlamaMLP(nn.Module):
             x_mask=self.x_mask_down,
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
+            rec=self.rec,
         )
         torch.cuda.synchronize()
         tmpResult = (qx, scale_x, scale, bsz, q_len)
