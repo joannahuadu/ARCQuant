@@ -121,6 +121,8 @@ class XMaskSwitchTop2Hard(nn.Module):
         self._last_x_mask_gate_frac_high = None
         self._last_x_mask_gate_tok_var = None
         self._last_x_mask_gate_delta_l2 = None
+        self._comp_channel_index = None
+        self._comp_x = None
 
     def _ensure_x_mask_token_mlp(self) -> TokenResidualMLP:
         if self.x_mask_token_mlp is not None:
@@ -183,10 +185,10 @@ class XMaskSwitchTop2Hard(nn.Module):
             mean_g = r_flat.mean(dim=0)
             var_g = r_flat.pow(2).mean(dim=0) - mean_g.pow(2)
             self._last_x_mask_gate_tok_var = var_g.clamp_min(0.0).mean()
-            # Bernoulli entropy
-            eps = 1e-12
-            ent = -(stats * (stats + eps).log() + (1.0 - stats) * (1.0 - stats + eps).log())
-            self._last_x_mask_gate_entropy = ent.mean()
+        #     # Bernoulli entropy
+        #     eps = 1e-12
+        #     ent = -(stats * (stats + eps).log() + (1.0 - stats) * (1.0 - stats + eps).log())
+        #     self._last_x_mask_gate_entropy = ent.mean()
 
     def _apply_x_mask(self, tensor: torch.Tensor) -> torch.Tensor:
         self._last_x_mask_ent = None
