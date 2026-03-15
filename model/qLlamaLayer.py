@@ -383,8 +383,6 @@ class QLlamaAttention(nn.Module):
             reorder_xw=self.reorder_xw,
             rec=self.rec,
         )
-        torch.cuda.synchronize()
-        
         hidden_states = (qx, scale_x, scale, bsz, q_len)
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -461,7 +459,6 @@ class QLlamaAttention(nn.Module):
             reorder_xw=self.reorder_xw,
             rec=self.rec,
         )
-        torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
         attn_output = self.o_proj(attn_output)
 
@@ -568,7 +565,6 @@ class QLlamaMLP(nn.Module):
             reorder_xw=self.reorder_xw,
             rec=self.rec,
         )
-        torch.cuda.synchronize()
         x = (qx, scale_x, scale, bsz, q_len)
         tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
         # Quantize the activations and feed into down_proj
@@ -589,7 +585,6 @@ class QLlamaMLP(nn.Module):
             reorder_xw=self.reorder_xw,
             rec=self.rec,
         )
-        torch.cuda.synchronize()
         tmpResult = (qx, scale_x, scale, bsz, q_len)
        
         return self.down_proj(tmpResult)

@@ -101,8 +101,6 @@ class QLinearLayer(nn.Module):
         else:
             y = F.linear(qx, self.W)
         
-        if qx.is_cuda:
-            torch.cuda.synchronize()
         if self.bias is not None:
             y = y + self.bias
 

@@ -379,8 +379,6 @@ class QMixtralAttention(nn.Module):
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
         )
-        torch.cuda.synchronize()
-        
         hidden_states = (qx, scale_x, scale, bsz, q_len)
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -457,7 +455,6 @@ class QMixtralAttention(nn.Module):
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
         )
-        torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
         attn_output = self.o_proj(attn_output)
 
@@ -665,7 +662,6 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
         )
-        torch.cuda.synchronize()
         x = (qx, scale_x, scale, None, q_len)
         # print(f"qx = {qx.shape}")
         tmpResult = self.act_fn(self.w1(x)) * self.w3(x)
@@ -682,7 +678,6 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
         )
-        torch.cuda.synchronize()
         tmpResult = (qx, scale_x, scale, None, q_len)
        
         return self.w2(tmpResult)

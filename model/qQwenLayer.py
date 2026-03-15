@@ -352,8 +352,6 @@ class QQwen2Attention(nn.Module):
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
         )
-        torch.cuda.synchronize()
-        
         hidden_states = (qx, scale_x, scale, bsz, q_len)
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         
@@ -431,7 +429,6 @@ class QQwen2Attention(nn.Module):
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
         )
-        torch.cuda.synchronize()
         attn_output = (qx, scale_x, scale, bsz, q_len)
         attn_output = self.o_proj(attn_output)
 
@@ -533,7 +530,6 @@ class QQwen2MLP(nn.Module):
             ste=torch.is_grad_enabled(),
             reorder_xw=self.reorder_xw,
         )
-        torch.cuda.synchronize()
         x = (qx, scale_x, scale, bsz, q_len)
         tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
         # Quantize the activations and feed into down_proj
