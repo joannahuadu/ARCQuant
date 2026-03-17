@@ -28,6 +28,7 @@ from x_mask_utils import (
     set_layer_x_mask_alpha,
     set_layer_x_mask_eval_mode,
 )
+from softmax_alpha_utils import load_softmax_alpha_checkpoint
 
 
 def build_logger(log_path: Path) -> logging.Logger:
@@ -449,6 +450,12 @@ def parse_args():
     parser.add_argument("--x_mask_r_thr", type=float, default=-1.0)
     parser.add_argument("--x_mask_eval_hard", action="store_true")
     parser.add_argument(
+        "--softmax_alpha_ckpt",
+        type=str,
+        default=None,
+        help="Load per-layer/per-head softmax alpha checkpoint produced by `python model/cali_softmax_alpha.py ...`.",
+    )
+    parser.add_argument(
         "--rec",
         action="store_true",
         help="Preserve pre-mask reconstruction channels for x_rec when x-mask is enabled.",
@@ -539,6 +546,11 @@ def main():
         meta = load_x_mask_checkpoint(model, args.x_mask_ckpt)
         if meta:
             logger.info(f"Loaded x-mask ckpt meta: {meta}")
+
+    if args.softmax_alpha_ckpt:
+        meta = load_softmax_alpha_checkpoint(model, args.softmax_alpha_ckpt)
+        if meta:
+            logger.info(f"Loaded softmax alpha ckpt meta: {meta}")
 
     if args.use_x_mask:
         x_mask_r_thr = None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr)

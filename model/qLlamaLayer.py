@@ -339,6 +339,7 @@ class QLlamaAttention(nn.Module):
         )
         self.rotary_emb = originalAttn.rotary_emb
 
+        self.register_buffer("softmax_alpha", torch.ones(self.num_heads, dtype=torch.float32))
 
         self.attention_dropout=originalAttn.attention_dropout
 
@@ -406,6 +407,9 @@ class QLlamaAttention(nn.Module):
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         # [bsz, nh, t, hd]
+        query_states = query_states * self.softmax_alpha.to(
+            device=query_states.device, dtype=query_states.dtype
+        ).view(1, self.num_heads, 1, 1)
 
         if past_key_value is not None:
             # reuse k, v, self_attention
