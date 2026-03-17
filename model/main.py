@@ -200,7 +200,7 @@ if __name__ == '__main__':
             if x_mask_r_thr is not None:
                 for xm in iter_layer_x_mask_modules(layer):
                     xm.x_mask_r_thr = x_mask_r_thr
-            if args.x_mask_eval_hard:
+            # if args.x_mask_eval_hard:
                 set_layer_x_mask_eval_mode(layer, True)
 
 

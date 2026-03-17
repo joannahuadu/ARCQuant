@@ -241,8 +241,8 @@ class XMaskSwitchTop2Hard(nn.Module):
         # Optional hard switch at eval time: enforce true 2:4 sparsity.
         r_thr = self.x_mask_r_thr
         if getattr(self, "_eval_mode", False) and r_thr is not None:
-            sel = (r_fp32 < float(r_thr)).to(dtype=mixed.dtype).unsqueeze(-1)
-            mixed = reshaped * (1.0 - sel) + x_sp * sel
+            hard_sel = (r_fp32 < float(r_thr)).to(dtype=mixed.dtype).unsqueeze(-1)
+            mixed = mixed * (1.0 - hard_sel + hard_sel * gate_raw)
 
         if alpha < 1.0:
             mixed = (1.0 - alpha) * reshaped + alpha * mixed

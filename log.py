@@ -528,10 +528,10 @@ def main():
     }
     if "llama" in args.model.lower():
         reorder_kwargs["rec"] = bool(args.rec)
-    model = reorder_model_func(
-        model,
-        **reorder_kwargs,
-    )
+    # model = reorder_model_func(
+    #     model,
+    #     **reorder_kwargs,
+    # )
     end_time = time.time()
     peak_memory = torch.cuda.max_memory_allocated()
 
@@ -547,7 +547,7 @@ def main():
             if x_mask_r_thr is not None:
                 for xm in iter_layer_x_mask_modules(layer):
                     xm.x_mask_r_thr = x_mask_r_thr
-            if args.x_mask_eval_hard:
+            # if args.x_mask_eval_hard:
                 set_layer_x_mask_eval_mode(layer, True)
 
     logger.info(f"Quantized Model Size: {peak_memory / (1024 * 1024 * 1024):.2f} GB")

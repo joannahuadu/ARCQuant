@@ -18,3 +18,8 @@ __pycache__/
 **/.vscode/
 **/.ipynb_checkpoints/
 outputs/*
+*.out
+*.pth
+*.sh
+*.png
+*.sh
