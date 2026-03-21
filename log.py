@@ -535,10 +535,10 @@ def main():
     }
     if "llama" in args.model.lower():
         reorder_kwargs["rec"] = bool(args.rec)
-    # model = reorder_model_func(
-    #     model,
-    #     **reorder_kwargs,
-    # )
+    model = reorder_model_func(
+        model,
+        **reorder_kwargs,
+    )
     end_time = time.time()
     peak_memory = torch.cuda.max_memory_allocated()
 
@@ -578,46 +578,46 @@ def main():
                 ppl = eval_ppl(model, testloader)
                 logger.info(f"Result,{dataset},{ppl:.3f}")
 
-        if args.tasks is not None:
-            import lm_eval
-            from lm_eval import utils as lm_eval_utils
-            from lm_eval.models.huggingface import HFLM
-            from lm_eval.tasks import initialize_tasks
-            from transformers import AutoTokenizer
+    if args.tasks is not None:
+        import lm_eval
+        from lm_eval import utils as lm_eval_utils
+        from lm_eval.models.huggingface import HFLM
+        from lm_eval.tasks import initialize_tasks
+        from transformers import AutoTokenizer
 
-            if tokenizer is None:
-                tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, legacy=False)
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, legacy=False)
 
-            initialize_tasks()
-            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+        initialize_tasks()
+        hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
 
-            task_patterns = []
-            for item in args.tasks:
-                task_patterns.extend([x.strip() for x in str(item).split(",") if x.strip()])
+        task_patterns = []
+        for item in args.tasks:
+            task_patterns.extend([x.strip() for x in str(item).split(",") if x.strip()])
 
-            task_names = lm_eval_utils.pattern_match(task_patterns, lm_eval.tasks.ALL_TASKS)
-            results = lm_eval.simple_evaluate(
-                hflm,
-                tasks=task_names,
-                num_fewshot=args.num_fewshot,
-                batch_size=args.lm_eval_batch_size,
-            )
+        task_names = lm_eval_utils.pattern_match(task_patterns, lm_eval.tasks.ALL_TASKS)
+        results = lm_eval.simple_evaluate(
+            hflm,
+            tasks=task_names,
+            num_fewshot=args.num_fewshot,
+            batch_size=args.lm_eval_batch_size,
+        )
 
-            results_by_task = results.get("results", {})
-            for task, metrics in results_by_task.items():
-                logger.info(task)
-                for k, v in metrics.items():
-                    if "stderr" not in k:
-                        logger.info(f"  {k}: {v}")
+        results_by_task = results.get("results", {})
+        for task, metrics in results_by_task.items():
+            logger.info(task)
+            for k, v in metrics.items():
+                if "stderr" not in k:
+                    logger.info(f"  {k}: {v}")
 
-            if args.output_file:
-                import json
+        if args.output_file:
+            import json
 
-                output_path = Path(args.output_file)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                with output_path.open("w", encoding="utf-8") as f:
-                    json.dump(results_by_task, f, indent=2)
-                logger.info(f"Results saved to {args.output_file}")
+            output_path = Path(args.output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open("w", encoding="utf-8") as f:
+                json.dump(results_by_task, f, indent=2)
+            logger.info(f"Results saved to {args.output_file}")
 
 
 if __name__ == "__main__":

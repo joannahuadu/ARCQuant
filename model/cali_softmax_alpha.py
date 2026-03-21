@@ -10,6 +10,10 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import logging
+from termcolor import colored
+from datetime import datetime
+import pprint
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -27,6 +31,34 @@ from x_mask_utils import (
     set_layer_x_mask_alpha,
     set_layer_x_mask_eval_mode,
 )
+
+def create_logger(exp_dir, dist_rank=0, name=''):
+    # create logger
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # create formatter
+    fmt = '[%(asctime)s %(name)s] (%(filename)s %(lineno)d): %(levelname)s %(message)s'
+    color_fmt = colored('[%(asctime)s %(name)s]', 'green') + \
+                colored('(%(filename)s %(lineno)d)', 'yellow') + ': %(levelname)s %(message)s'
+
+    # create console handlers for master process
+    if dist_rank == 0:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(
+            logging.Formatter(fmt=color_fmt, datefmt='%Y-%m-%d %H:%M:%S'))
+        logger.addHandler(console_handler)
+
+    # create file handlers
+    log_file = os.path.join(exp_dir, f'log_rank{dist_rank}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
+    file_handler = logging.FileHandler(log_file, mode='a')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(fmt=fmt, datefmt='%Y-%m-%d %H:%M:%S'))
+    logger.addHandler(file_handler)
+
+    return logger
 
 
 def _parse_model_name(model_path: str) -> str:
@@ -79,7 +111,7 @@ def _build_quant_model(args, reorder_model_func, reorder_index, select_nums):
             if x_mask_r_thr is not None:
                 for xm in iter_layer_x_mask_modules(layer):
                     xm.x_mask_r_thr = x_mask_r_thr
-            if args.x_mask_eval_hard:
+            # if args.x_mask_eval_hard:
                 set_layer_x_mask_eval_mode(layer, True)
     model.to(DEV)
     model.eval()
@@ -376,8 +408,18 @@ def main():
     parser.add_argument("--alpha_min", type=float, default=0.5)
     parser.add_argument("--alpha_max", type=float, default=1.5)
     parser.add_argument("--alpha_step", type=float, default=0.005)
-    parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default="./outputs", help="Output directory path.")
+    parser.add_argument("--exp_name", type=str, default="exp", help="Experiment name.")
     args = parser.parse_args()
+
+    args.exp_name = f"{args.exp_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    args.model_name = args.model.split("/")[-1]
+    args.exp_dir = os.path.join(args.output_dir, args.model_name, f"{args.quant_type}", args.exp_name)
+    os.makedirs(args.exp_dir, exist_ok=True)
+    logger = create_logger(args.exp_dir)
+    logger.info('Arguments: ')
+    logger.info(pprint.pformat(vars(args)))
+    logger.info('--' * 30)
 
     if args.alpha_step <= 0:
         raise ValueError("--alpha_step must be > 0")
@@ -402,14 +444,7 @@ def main():
     alpha, counts, grid = _fit_alpha(quant_model, loader, args, targets)
     set_model_softmax_alpha(quant_model, alpha)
 
-    output_path = args.output_path
-    if output_path is None:
-        output_dir = ROOT_DIR / "outputs" / model_name / args.quant_type
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"softmax_alpha_{dataset_name}_{args.act_sort_metric}.pt"
-    else:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = os.path.join(args.exp_dir, f"softmax_alpha_{dataset_name}_{args.act_sort_metric}.pt")
 
     torch.save(
         {
