@@ -83,6 +83,66 @@ def _load_reorder_artifacts(model_name: str, dataset_name: str, metric: str):
     return reorder_index, select_nums
 
 
+def _get_tokenizer(model_path: str):
+    from transformers import AutoTokenizer
+
+    if "llama" in model_path.lower():
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        if tokenizer.bos_token_id != 1 or tokenizer.eos_token_id != 2:
+            try:
+                tokenizer.bos_token_id = 1
+                tokenizer.eos_token_id = 2
+            except AttributeError:
+                pass
+        return tokenizer
+    return AutoTokenizer.from_pretrained(model_path, use_fast=False, legacy=False)
+
+
+def _build_arc_prompt(sample: dict) -> str:
+    question = str(sample.get("question", "")).strip()
+    choices = sample.get("choices", {}) or {}
+    labels = choices.get("label", []) or []
+    texts = choices.get("text", []) or []
+    lines = [f"Question: {question}", "Choices:"]
+    for label, text in zip(labels, texts):
+        lines.append(f"{label}. {str(text).strip()}")
+    lines.append("Answer:")
+    return "\n".join(lines)
+
+
+def _get_arc_challenge_loader(nsamples: int, seed: int, seqlen: int, model_path: str):
+    import random
+    from datasets import load_dataset
+
+    tokenizer = _get_tokenizer(model_path)
+    dataset = load_dataset("ai2_arc", "ARC-Challenge", split="train")
+    rng = random.Random(seed)
+    indices = list(range(len(dataset)))
+    rng.shuffle(indices)
+
+    trainloader = []
+    for idx in indices:
+        prompt = _build_arc_prompt(dataset[idx])
+        encoded = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=seqlen,
+        ).input_ids
+        if encoded.shape[1] < 8:
+            continue
+        trainloader.append((encoded[:, -seqlen:], encoded.clone()[:, -seqlen:]))
+        if len(trainloader) >= nsamples:
+            break
+    return trainloader, None, tokenizer
+
+
+def _get_calibration_loader(name: str, *, nsamples: int, seed: int, seqlen: int, model: str):
+    if name == "arc_challenge":
+        return _get_arc_challenge_loader(nsamples, seed, seqlen, model)
+    return get_loaders(name, nsamples=nsamples, seed=seed, seqlen=seqlen, model=model)
+
+
 def _build_quant_model(args, reorder_model_func, reorder_index, select_nums):
     model_builder, _ = _resolve_model_family(args.model)
     model = model_builder(args.model)
@@ -390,7 +450,14 @@ def main():
     parser.add_argument("model", type=str)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--act_sort_metric", type=str, default="max", choices=["mean", "frobenius", "hessian", "max"])
-    parser.add_argument("--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"])
+    parser.add_argument("--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "arc_challenge"])
+    parser.add_argument(
+        "--reorder_dataset",
+        type=str,
+        default="wikitext2",
+        choices=["wikitext2", "c4"],
+        help="Dataset name used by saved reorder/select_num artifacts. Keep this as wikitext2 unless you built reorder indices on another dataset.",
+    )
     parser.add_argument("--nsamples", type=int, default=32)
     parser.add_argument("--seqlen", type=int, default=2048)
     parser.add_argument("--kv_cache", action="store_true")
@@ -429,8 +496,14 @@ def main():
     model_name = _parse_model_name(args.model)
     dataset_name = args.dataset.lower()
     model_builder, reorder_model_func = _resolve_model_family(args.model)
-    reorder_index, select_nums = _load_reorder_artifacts(model_name, dataset_name, args.act_sort_metric)
-    loader, _testenc, _tokenizer = get_loaders(dataset_name, nsamples=args.nsamples, seed=args.seed, seqlen=args.seqlen, model=args.model)
+    reorder_index, select_nums = _load_reorder_artifacts(model_name, args.reorder_dataset.lower(), args.act_sort_metric)
+    loader, _testenc, _tokenizer = _get_calibration_loader(
+        dataset_name,
+        nsamples=args.nsamples,
+        seed=args.seed,
+        seqlen=args.seqlen,
+        model=args.model,
+    )
 
     print("Collecting bf16 target entropy...")
     bf16_model = model_builder(args.model).to(DEV)
@@ -453,6 +526,7 @@ def main():
             "meta": {
                 "model": args.model,
                 "dataset": args.dataset,
+                "reorder_dataset": args.reorder_dataset,
                 "nsamples": args.nsamples,
                 "seqlen": args.seqlen,
                 "quant_type": args.quant_type,
