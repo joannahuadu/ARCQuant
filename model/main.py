@@ -192,6 +192,7 @@ if __name__ == '__main__':
         model,
         **reorder_kwargs,
     )
+    model.eval()
     end_time=time.time()
     peak_memory = torch.cuda.max_memory_allocated()
 
