@@ -580,7 +580,9 @@ def main():
                 logger.info(f"Result,{dataset},{ppl:.3f}")
 
     if args.tasks is not None:
+        import random
         import lm_eval
+        import numpy as np
         from lm_eval import utils as lm_eval_utils
         from lm_eval.models.huggingface import HFLM
         from lm_eval.tasks import initialize_tasks
@@ -590,21 +592,25 @@ def main():
             tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, legacy=False)
 
         initialize_tasks()
-        hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
-
         task_patterns = []
         for item in args.tasks:
             task_patterns.extend([x.strip() for x in str(item).split(",") if x.strip()])
 
-        task_names = lm_eval_utils.pattern_match(task_patterns, lm_eval.tasks.ALL_TASKS)
-        results = lm_eval.simple_evaluate(
-            hflm,
-            tasks=task_names,
-            num_fewshot=args.num_fewshot,
-            batch_size=args.lm_eval_batch_size,
-        )
-
-        results_by_task = results.get("results", {})
+        task_names = sorted(set(lm_eval_utils.pattern_match(task_patterns, lm_eval.tasks.ALL_TASKS)))
+        results_by_task = {}
+        for task_name in task_names:
+            random.seed(args.seed)
+            np.random.seed(args.seed)
+            torch.manual_seed(args.seed)
+            model.eval()
+            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+            result = lm_eval.simple_evaluate(
+                hflm,
+                tasks=[task_name],
+                num_fewshot=args.num_fewshot,
+                batch_size=args.lm_eval_batch_size,
+            )
+            results_by_task[task_name] = result.get("results", {}).get(task_name, {})
         for task, metrics in results_by_task.items():
             logger.info(task)
             for k, v in metrics.items():

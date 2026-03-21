@@ -19,7 +19,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, help="path of the hf model")
 parser.add_argument(
-    "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "humaneval", "pile"], 
+    "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "humaneval", "pile", "arc_challenge"], 
     help="The calibration dataset to use."
 )
 parser.add_argument("--act_sort_metric", type=str, help="the metric used to sort the activations.")
@@ -30,11 +30,56 @@ parser.add_argument("--seqlen", type=int, default=2048)
 args = parser.parse_args()
 
 
+def get_arc_challenge(nsamples, seed, seqlen, tokenizer):
+    import random
+
+    dataset = load_dataset("ai2_arc", "ARC-Challenge", split="train")
+    indices = list(range(len(dataset)))
+    random.Random(seed).shuffle(indices)
+
+    trainloader = []
+    inps = []
+
+    for idx in indices:
+        sample = dataset[idx]
+        question = str(sample.get("question", "")).strip()
+        choices = sample.get("choices", {}) or {}
+        labels = choices.get("label", []) or []
+        texts = choices.get("text", []) or []
+
+        lines = [f"Question: {question}", "Choices:"]
+        for label, text in zip(labels, texts):
+            lines.append(f"{label}. {str(text).strip()}")
+        lines.append("Answer:")
+        prompt = "\n".join(lines)
+
+        encoded = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=seqlen,
+        ).input_ids
+        if encoded.shape[1] < 8:
+            continue
+
+        inp = encoded[:, -seqlen:]
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+        inps.append(inp)
+
+        if len(trainloader) >= nsamples:
+            break
+
+    return trainloader, inps
+
+
 DATASET_LOADERS = {
     "wikitext2": get_wikitext2,
     "c4": get_c4,
     "pile": get_pile,
-    "humaneval": get_humaneval
+    "humaneval": get_humaneval,
+    "arc_challenge": get_arc_challenge,
 }
         
 def main():
