@@ -28,6 +28,7 @@ from softmax_alpha_utils import set_model_softmax_alpha
 from x_mask_utils import (
     iter_layer_x_mask_modules,
     load_x_mask_checkpoint,
+    parse_layer_spec,
     set_layer_x_mask_alpha,
     set_layer_x_mask_eval_mode,
 )
@@ -157,6 +158,7 @@ def _build_quant_model(args, reorder_model_func, reorder_index, select_nums):
         "use_x_mask": bool(args.use_x_mask),
         "x_mask_tau": float(args.x_mask_tau),
         "x_mask_alpha": float(args.x_mask_alpha),
+        "x_mask_skip_layers": args.x_mask_skip_layers,
         "x_mask_r_thr": None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr),
     }
     if "llama" in args.model.lower():
@@ -165,8 +167,11 @@ def _build_quant_model(args, reorder_model_func, reorder_index, select_nums):
     if args.use_x_mask and args.x_mask_ckpt:
         load_x_mask_checkpoint(model, args.x_mask_ckpt)
     if args.use_x_mask:
+        skip_layers = parse_layer_spec(args.x_mask_skip_layers)
         x_mask_r_thr = None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr)
-        for layer in model.model.layers:
+        for layer_idx, layer in enumerate(model.model.layers):
+            if layer_idx in skip_layers:
+                continue
             set_layer_x_mask_alpha(layer, float(args.x_mask_alpha))
             if x_mask_r_thr is not None:
                 for xm in iter_layer_x_mask_modules(layer):
@@ -467,6 +472,7 @@ def main():
     parser.add_argument("--x_mask_ckpt", type=str, default=None)
     parser.add_argument("--x_mask_tau", type=float, default=1.0)
     parser.add_argument("--x_mask_alpha", type=float, default=1.0)
+    parser.add_argument("--x_mask_skip_layers", type=str, default="", help="Comma/range list of layer ids to skip x-mask, e.g. '0,1,8-15'.")
     parser.add_argument("--x_mask_r_thr", type=float, default=-1.0)
     parser.add_argument("--x_mask_eval_hard", action="store_true")
     parser.add_argument("--rec", action="store_true")

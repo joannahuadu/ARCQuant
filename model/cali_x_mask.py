@@ -11,7 +11,7 @@ from datetime import datetime
 import pprint
 from datautils import DEV, get_loaders
 from model_utils import reorder_model_llama, reorder_model_mixtral, reorder_model_qwen
-from x_mask_utils import iter_layer_x_mask_modules, set_layer_x_mask_alpha, set_layer_x_mask_eval_mode, configure_x_mask_token_gate
+from x_mask_utils import iter_layer_x_mask_modules, set_layer_x_mask_alpha, set_layer_x_mask_eval_mode, configure_x_mask_token_gate, parse_layer_spec
 
 def create_logger(exp_dir, dist_rank=0, name=''):
     # create logger
@@ -107,6 +107,7 @@ def main():
     # x-mask config
     parser.add_argument("--x_mask_tau", type=float, default=1.0)
     parser.add_argument("--x_mask_alpha", type=float, default=1.0)
+    parser.add_argument("--x_mask_skip_layers", type=str, default="", help="Comma/range list of layer ids to skip x-mask, e.g. '0,1,8-15'.")
     parser.add_argument("--x_mask_r_thr", type=float, default=-1.0)
 
     # token gate config (FlatQuant compatible)
@@ -186,6 +187,7 @@ def main():
         use_x_mask=True,
         x_mask_tau=float(args.x_mask_tau),
         x_mask_alpha=float(args.x_mask_alpha),
+        x_mask_skip_layers=args.x_mask_skip_layers,
         x_mask_r_thr=x_mask_r_thr,
     )
 
