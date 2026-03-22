@@ -458,6 +458,12 @@ def parse_args():
         help="Load per-layer/per-head softmax alpha checkpoint produced by `python model/cali_softmax_alpha.py ...`.",
     )
     parser.add_argument(
+        "--softmax_alpha_skip_layers",
+        type=str,
+        default="",
+        help="Comma/range list of layer ids to skip softmax alpha, e.g. '0,1,8-15'.",
+    )
+    parser.add_argument(
         "--rec",
         action="store_true",
         help="Preserve pre-mask reconstruction channels for x_rec when x-mask is enabled.",
@@ -555,7 +561,7 @@ def main():
         meta = load_softmax_alpha_checkpoint(
             model,
             args.softmax_alpha_ckpt,
-            skip_layers=args.x_mask_skip_layers,
+            skip_layers=args.softmax_alpha_skip_layers,
         )
         if meta:
             logger.info(f"Loaded softmax alpha ckpt meta: {meta}")

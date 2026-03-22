@@ -481,6 +481,7 @@ def main():
     parser.add_argument("--alpha_min", type=float, default=0.5)
     parser.add_argument("--alpha_max", type=float, default=1.5)
     parser.add_argument("--alpha_step", type=float, default=0.005)
+    parser.add_argument("--softmax_alpha_skip_layers", type=str, default="", help="Comma/range list of layer ids to skip softmax alpha, e.g. '0,1,8-15'.")
     parser.add_argument("--output_dir", type=str, default="./outputs", help="Output directory path.")
     parser.add_argument("--exp_name", type=str, default="exp", help="Experiment name.")
     args = parser.parse_args()
@@ -521,7 +522,7 @@ def main():
     print("Building quantized model and fitting softmax alpha...")
     quant_model = _build_quant_model(args, reorder_model_func, reorder_index, select_nums)
     alpha, counts, grid = _fit_alpha(quant_model, loader, args, targets)
-    set_model_softmax_alpha(quant_model, alpha, skip_layers=args.x_mask_skip_layers)
+    set_model_softmax_alpha(quant_model, alpha, skip_layers=args.softmax_alpha_skip_layers)
 
     output_path = os.path.join(args.exp_dir, f"softmax_alpha_{dataset_name}_{args.act_sort_metric}.pt")
 
@@ -541,6 +542,7 @@ def main():
                 "alpha_min": args.alpha_min,
                 "alpha_max": args.alpha_max,
                 "alpha_step": args.alpha_step,
+                "softmax_alpha_skip_layers": args.softmax_alpha_skip_layers,
                 "grid_size": int(grid.numel()),
             },
         },
