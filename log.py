@@ -581,13 +581,13 @@ def main():
     _register_log_hooks(model, logger, args)
 
     tokenizer = None
-    with SoftmaxStatsScope(args, logger, model=model):
-        if args.eval_ppl:
-            for dataset in ["wikitext2"]:
-                _, testloader, tokenizer = get_loaders(dataset, seed=args.seed, model=args.model, seqlen=2048)
-                logger.info(f"Evaluating {dataset} ...")
-                ppl = eval_ppl(model, testloader)
-                logger.info(f"Result,{dataset},{ppl:.3f}")
+    # with SoftmaxStatsScope(args, logger, model=model):
+    if args.eval_ppl:
+        for dataset in ["wikitext2"]:
+            _, testloader, tokenizer = get_loaders(dataset, seed=args.seed, model=args.model, seqlen=2048)
+            logger.info(f"Evaluating {dataset} ...")
+            ppl = eval_ppl(model, testloader)
+            logger.info(f"Result,{dataset},{ppl:.3f}")
 
     if args.tasks is not None:
         import random
@@ -608,19 +608,20 @@ def main():
 
         task_names = sorted(set(lm_eval_utils.pattern_match(task_patterns, lm_eval.tasks.ALL_TASKS)))
         results_by_task = {}
-        for task_name in task_names:
-            random.seed(args.seed)
-            np.random.seed(args.seed)
-            torch.manual_seed(args.seed)
-            model.eval()
-            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
-            result = lm_eval.simple_evaluate(
-                hflm,
-                tasks=[task_name],
-                num_fewshot=args.num_fewshot,
-                batch_size=args.lm_eval_batch_size,
-            )
-            results_by_task[task_name] = result.get("results", {}).get(task_name, {})
+        with SoftmaxStatsScope(args, logger, model=model):
+            for task_name in task_names:
+                random.seed(args.seed)
+                np.random.seed(args.seed)
+                torch.manual_seed(args.seed)
+                model.eval()
+                hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+                result = lm_eval.simple_evaluate(
+                    hflm,
+                    tasks=[task_name],
+                    num_fewshot=args.num_fewshot,
+                    batch_size=args.lm_eval_batch_size,
+                )
+                results_by_task[task_name] = result.get("results", {}).get(task_name, {})
         for task, metrics in results_by_task.items():
             logger.info(task)
             for k, v in metrics.items():
