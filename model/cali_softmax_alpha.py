@@ -521,7 +521,7 @@ def main():
     print("Building quantized model and fitting softmax alpha...")
     quant_model = _build_quant_model(args, reorder_model_func, reorder_index, select_nums)
     alpha, counts, grid = _fit_alpha(quant_model, loader, args, targets)
-    set_model_softmax_alpha(quant_model, alpha)
+    set_model_softmax_alpha(quant_model, alpha, skip_layers=args.x_mask_skip_layers)
 
     output_path = os.path.join(args.exp_dir, f"softmax_alpha_{dataset_name}_{args.act_sort_metric}.pt")
 

@@ -552,7 +552,11 @@ def main():
             logger.info(f"Loaded x-mask ckpt meta: {meta}")
 
     if args.softmax_alpha_ckpt:
-        meta = load_softmax_alpha_checkpoint(model, args.softmax_alpha_ckpt)
+        meta = load_softmax_alpha_checkpoint(
+            model,
+            args.softmax_alpha_ckpt,
+            skip_layers=args.x_mask_skip_layers,
+        )
         if meta:
             logger.info(f"Loaded softmax alpha ckpt meta: {meta}")
 

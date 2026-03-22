@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Iterable
 
 import torch
+from x_mask_utils import parse_layer_spec
 
 
-def iter_attention_modules(model) -> Iterable[torch.nn.Module]:
+def iter_attention_modules(model, *, skip_layers=None) -> Iterable[torch.nn.Module]:
     if hasattr(model, "module"):
         model = model.module
     layers = None
@@ -15,7 +16,10 @@ def iter_attention_modules(model) -> Iterable[torch.nn.Module]:
         layers = model.layers
     if layers is None:
         return
-    for layer in layers:
+    skip_layers = parse_layer_spec(skip_layers)
+    for layer_idx, layer in enumerate(layers):
+        if layer_idx in skip_layers:
+            continue
         attn = getattr(layer, "self_attn", None)
         if attn is not None and hasattr(attn, "softmax_alpha"):
             yield attn
@@ -40,8 +44,8 @@ def _coerce_alpha_tensor(alpha, n_layers: int | None = None) -> torch.Tensor:
     return alpha
 
 
-def set_model_softmax_alpha(model, alpha) -> torch.Tensor:
-    attn_modules = list(iter_attention_modules(model))
+def set_model_softmax_alpha(model, alpha, *, skip_layers=None) -> torch.Tensor:
+    attn_modules = list(iter_attention_modules(model, skip_layers=skip_layers))
     if not attn_modules:
         raise ValueError("no attention modules with softmax_alpha found")
 
@@ -64,8 +68,8 @@ def set_model_softmax_alpha(model, alpha) -> torch.Tensor:
     return torch.stack([attn.softmax_alpha.detach().float().cpu() for attn in attn_modules], dim=0)
 
 
-def load_softmax_alpha_checkpoint(model, path: str):
+def load_softmax_alpha_checkpoint(model, path: str, *, skip_layers=None):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     meta = ckpt.get("meta", {}) if isinstance(ckpt, dict) else {}
-    alpha = set_model_softmax_alpha(model, ckpt)
+    alpha = set_model_softmax_alpha(model, ckpt, skip_layers=skip_layers)
     return {"path": path, "shape": list(alpha.shape), **meta}
