@@ -15,6 +15,7 @@ from qMixtralLayer import QMixtralDecoderLayer
 from functools import partial
 
 import math
+from x_mask_utils import parse_layer_spec
 
 
 def reorder_model_llama(
@@ -31,13 +32,16 @@ def reorder_model_llama(
     x_mask_alpha: float = 1.0,
     x_mask_r_thr=None,
     rec: bool = False,
+    x_mask_skip_layers=None,
 ):
     model.config.use_cache = False
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
 
+    skip_layers = parse_layer_spec(x_mask_skip_layers)
     for i in tqdm(range(len(layers))):
         layers[i] = layers[i].to(device)
+        layer_use_x_mask = bool(use_x_mask) and i not in skip_layers
         if isinstance(layers[i], LlamaDecoderLayer):
             m = QLlamaDecoderLayer(
                 originalLayer=layers[i],
@@ -47,7 +51,7 @@ def reorder_model_llama(
                 layer_idx=i,
                 quant_type=quant_type,
                 reorder_xw=reorder_xw,
-                use_x_mask=use_x_mask,
+                use_x_mask=layer_use_x_mask,
                 x_mask_tau=x_mask_tau,
                 x_mask_alpha=x_mask_alpha,
                 x_mask_r_thr=x_mask_r_thr,
@@ -80,13 +84,16 @@ def reorder_model_qwen(
     x_mask_tau: float = 1.0,
     x_mask_alpha: float = 1.0,
     x_mask_r_thr=None,
+    x_mask_skip_layers=None,
 ):
     model.config.use_cache = False
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
 
+    skip_layers = parse_layer_spec(x_mask_skip_layers)
     for i in tqdm(range(len(layers))):
         layers[i] = layers[i].to(device)
+        layer_use_x_mask = bool(use_x_mask) and i not in skip_layers
         if isinstance(layers[i], Qwen2DecoderLayer):
             m = QQwen2DecoderLayer(
                 originalLayer=layers[i],
@@ -96,7 +103,7 @@ def reorder_model_qwen(
                 layer_idx=i,
                 quant_type=quant_type,
                 reorder_xw=reorder_xw,
-                use_x_mask=use_x_mask,
+                use_x_mask=layer_use_x_mask,
                 x_mask_tau=x_mask_tau,
                 x_mask_alpha=x_mask_alpha,
                 x_mask_r_thr=x_mask_r_thr,
@@ -126,13 +133,16 @@ def reorder_model_mixtral(
     x_mask_tau: float = 1.0,
     x_mask_alpha: float = 1.0,
     x_mask_r_thr=None,
+    x_mask_skip_layers=None,
 ):
     model.config.use_cache = False
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
 
+    skip_layers = parse_layer_spec(x_mask_skip_layers)
     for i in tqdm(range(len(layers))):
         layers[i] = layers[i].to(device)
+        layer_use_x_mask = bool(use_x_mask) and i not in skip_layers
         if isinstance(layers[i], MixtralDecoderLayer):
             m = QMixtralDecoderLayer(
                 originalLayer=layers[i],
@@ -142,7 +152,7 @@ def reorder_model_mixtral(
                 layer_idx=i,
                 quant_type=quant_type,
                 reorder_xw=reorder_xw,
-                use_x_mask=use_x_mask,
+                use_x_mask=layer_use_x_mask,
                 x_mask_tau=x_mask_tau,
                 x_mask_alpha=x_mask_alpha,
                 x_mask_r_thr=x_mask_r_thr,

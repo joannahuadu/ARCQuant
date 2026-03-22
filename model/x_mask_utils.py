@@ -5,6 +5,32 @@ from typing import Iterable, Optional
 import torch
 
 
+def parse_layer_spec(spec) -> set[int]:
+    if spec is None:
+        return set()
+    if isinstance(spec, (list, tuple, set)):
+        return {int(x) for x in spec}
+    text = str(spec).strip()
+    if not text:
+        return set()
+
+    layers: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start = int(start_s.strip())
+            end = int(end_s.strip())
+            if end < start:
+                start, end = end, start
+            layers.update(range(start, end + 1))
+        else:
+            layers.add(int(part))
+    return layers
+
+
 def iter_layer_x_mask_modules(layer) -> Iterable[torch.nn.Module]:
     """Yield all x-mask modules attached to an ARCQuant decoder layer."""
     self_attn = getattr(layer, "self_attn", None)
