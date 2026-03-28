@@ -85,6 +85,10 @@ if __name__ == '__main__':
     parser.add_argument('--output_file', type=str, default=None, help='Optional path to save lm_eval results as JSON.')
     parser.add_argument('--lm_eval_batch_size', type=int, default=16, help='Batch size for evaluation with lm eval harness.')
     parser.add_argument('--num_fewshot', type=int, default=0, help='Number of few-shot examples for lm_eval.')
+    parser.add_argument('--batch_size_overrides', type=str, default='{"mmlu": 1, "ceval-valid": 1}',
+        help='JSON dict of per-task batch size overrides to prevent OOM on long 5-shot contexts.')
+    parser.add_argument('--fewshot_overrides', type=str, default='{"mmlu": 5, "ceval-valid": 5}',
+        help='JSON dict of per-task fewshot overrides, e.g. \'{"mmlu": 5, "ceval-valid": 5}\'')
     parser.add_argument(
         "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"], 
         help="The calibration dataset to use."
@@ -229,7 +233,6 @@ if __name__ == '__main__':
             if x_mask_r_thr is not None:
                 for xm in iter_layer_x_mask_modules(layer):
                     xm.x_mask_r_thr = x_mask_r_thr
-            # if args.x_mask_eval_hard:
                 set_layer_x_mask_eval_mode(layer, True)
 
 
@@ -261,7 +264,7 @@ if __name__ == '__main__':
         import numpy as np
         from lm_eval import utils as lm_eval_utils
         from lm_eval.models.huggingface import HFLM
-        from lm_eval.tasks import initialize_tasks
+        from lm_eval.tasks import TaskManager
         from transformers import AutoTokenizer
 
         if "llama" in args.model.lower():
@@ -269,24 +272,45 @@ if __name__ == '__main__':
         else:
             tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, legacy=False)
 
-        initialize_tasks()
+        task_manager = TaskManager()
         task_patterns = []
         for item in args.tasks:
             task_patterns.extend([x.strip() for x in str(item).split(",") if x.strip()])
 
-        task_names = sorted(set(lm_eval_utils.pattern_match(task_patterns, lm_eval.tasks.ALL_TASKS)))
+        # Task aliases: ceval → ceval-valid (lm_eval registered name)
+        TASK_ALIASES = {"ceval": "ceval-valid"}
+        task_patterns = [TASK_ALIASES.get(t, t) for t in task_patterns]
+
+        # Route longbench to its own script
+        if "longbench" in task_patterns:
+            task_patterns = [t for t in task_patterns if t != "longbench"]
+            print("\nNote: 'longbench' is not in lm_eval. Evaluate separately with:")
+            print("  python model/eval_longbench.py <same model/quant args> --tasks <task_names>")
+
+        import json as _json
+        fewshot_overrides = _json.loads(args.fewshot_overrides) if args.fewshot_overrides else {}
+        batch_size_overrides = _json.loads(args.batch_size_overrides) if args.batch_size_overrides else {}
+
+        task_names = sorted(set(lm_eval_utils.pattern_match(task_patterns, task_manager.all_tasks)))
         results_by_task = {}
         for task_name in task_names:
             random.seed(args.seed)
             np.random.seed(args.seed)
             torch.manual_seed(args.seed)
             model.eval()
-            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+            # Use per-task batch size; prefix-match so {"mmlu": 2} covers mmlu_abstract_algebra etc.
+            task_bsz = next(
+                (v for k, v in batch_size_overrides.items()
+                 if task_name == k or task_name.startswith(k + '_')),
+                args.lm_eval_batch_size,
+            )
+            hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=task_bsz)
+            task_fewshot = fewshot_overrides.get(task_name, args.num_fewshot)
             result = lm_eval.simple_evaluate(
                 hflm,
                 tasks=[task_name],
-                num_fewshot=args.num_fewshot,
-                batch_size=args.lm_eval_batch_size,
+                num_fewshot=task_fewshot,
+                batch_size=task_bsz,
             )
             results_by_task[task_name] = result.get("results", {}).get(task_name, {})
         print("\n" + "=" * 60)

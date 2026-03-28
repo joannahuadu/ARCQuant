@@ -102,8 +102,25 @@ def set_model_softmax_alpha(model, alpha, *, skip_layers=None) -> torch.Tensor:
     )
 
 
+def set_model_output_scale(model, output_scale) -> torch.Tensor:
+    """Load per-channel output_scale [n_layers, hidden_size] into all attention modules."""
+    attn_layers = _get_attention_layers(model)
+    output_scale = torch.as_tensor(output_scale, dtype=torch.float32)
+    if output_scale.dim() == 1:
+        output_scale = output_scale.unsqueeze(0).expand(len(attn_layers), -1)
+    for layer_idx, attn in enumerate(attn_layers):
+        if attn is None or not hasattr(attn, "output_scale"):
+            continue
+        attn.output_scale.copy_(
+            output_scale[layer_idx].to(device=attn.output_scale.device, dtype=attn.output_scale.dtype)
+        )
+    return output_scale
+
+
 def load_softmax_alpha_checkpoint(model, path: str, *, skip_layers=None):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     meta = ckpt.get("meta", {}) if isinstance(ckpt, dict) else {}
     alpha = set_model_softmax_alpha(model, ckpt, skip_layers=skip_layers)
+    if isinstance(ckpt, dict) and "output_scale" in ckpt:
+        set_model_output_scale(model, ckpt["output_scale"])
     return {"path": path, "shape": list(alpha.shape), **meta}

@@ -340,6 +340,11 @@ class QLlamaAttention(nn.Module):
         self.rotary_emb = originalAttn.rotary_emb
 
         self.register_buffer("softmax_alpha", torch.ones(self.num_heads, dtype=torch.float32))
+        # Per-channel output scale applied after o_proj (position B).
+        # Compensates for the channel-wise bias introduced by x_mask_out.
+        # Applied to the dense o_proj output — does NOT disturb the 2:4 sparse qx
+        # that feeds into the matrix multiply.
+        self.register_buffer("output_scale", torch.ones(self.hidden_size, dtype=torch.float32))
 
         self.attention_dropout=originalAttn.attention_dropout
 
@@ -464,7 +469,11 @@ class QLlamaAttention(nn.Module):
             rec=self.rec,
         )
         attn_output = (qx, scale_x, scale, bsz, q_len)
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output)  # [bsz, q_len, hidden_size], dense
+
+        # Position B: per-channel scale on the dense o_proj output.
+        # The 2:4 sparse matmul is already done; this is a plain dense correction.
+        attn_output = attn_output * self.output_scale.to(attn_output.dtype)
 
         if not output_attentions:
             attn_weights = None

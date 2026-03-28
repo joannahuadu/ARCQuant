@@ -61,7 +61,7 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
         while True:
             i = random.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
-            if trainenc.input_ids.shape[1] >= seqlen:
+            if trainenc.input_ids.shape[1] > seqlen:
                 break
         i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
         j = i + seqlen
@@ -77,7 +77,7 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
         while True:
             i = random.randint(0, len(valdata) - 1)
             tmp = tokenizer(valdata[i]['text'], return_tensors='pt')
-            if tmp.input_ids.shape[1] >= seqlen:
+            if tmp.input_ids.shape[1] > seqlen:
                 break
         i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
         j = i + seqlen
@@ -145,6 +145,58 @@ def get_c4_new(nsamples, seed, seqlen, model, tokenizer):
     return trainloader, valenc, tokenizer
 
 
+def get_arc_mix(nsamples, seed, seqlen, model, tokenizer):
+    """Calibration data from arc_challenge + arc_easy + rte train splits.
+
+    Mixes MCQ (arc) and NLI (rte) format text to improve generalization on
+    downstream benchmarks with these task formats.
+    """
+    from datasets import load_dataset
+    import random
+    random.seed(seed)
+
+    texts = []
+
+    # arc_challenge train
+    arc_c = load_dataset('allenai/ai2_arc', 'ARC-Challenge', split='train')
+    for ex in arc_c:
+        ch_labels = ex['choices']['label']
+        ch_texts = ex['choices']['text']
+        opts = "\n".join(f"{l}. {t}" for l, t in zip(ch_labels, ch_texts))
+        texts.append(f"Question: {ex['question']}\n{opts}\nAnswer: {ex['answerKey']}")
+
+    # arc_easy train
+    arc_e = load_dataset('allenai/ai2_arc', 'ARC-Easy', split='train')
+    for ex in arc_e:
+        ch_labels = ex['choices']['label']
+        ch_texts = ex['choices']['text']
+        opts = "\n".join(f"{l}. {t}" for l, t in zip(ch_labels, ch_texts))
+        texts.append(f"Question: {ex['question']}\n{opts}\nAnswer: {ex['answerKey']}")
+
+    # rte train (SuperGLUE)
+    rte = load_dataset('super_glue', 'rte', split='train')
+    label_map = {0: "yes", 1: "no"}
+    for ex in rte:
+        texts.append(
+            f"Premise: {ex['premise']}\nHypothesis: {ex['hypothesis']}\n"
+            f"Entailment: {label_map.get(ex['label'], 'yes')}"
+        )
+
+    random.shuffle(texts)
+    all_text = "\n\n".join(texts)
+    trainenc = tokenizer(all_text, return_tensors='pt')
+
+    trainloader = []
+    for _ in range(nsamples):
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        inp = trainenc.input_ids[:, i:i + seqlen]
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+
+    return trainloader, trainenc, tokenizer
+
+
 def get_loaders(
     name, nsamples=128, seed=0, seqlen=2048, model=''
 ):
@@ -175,3 +227,5 @@ def get_loaders(
         if 'new' in name:
             return get_c4_new(nsamples, seed, seqlen, model, tokenizer)
         return get_c4(nsamples, seed, seqlen, model, tokenizer)
+    if 'arc_mix' in name:
+        return get_arc_mix(nsamples, seed, seqlen, model, tokenizer)

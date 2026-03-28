@@ -1,5 +1,5 @@
-transformers==4.44.0
-peft==0.17.1
+transformers==4.46.3
+peft==0.18.1
 datasets==3.4.0
 lm-eval==0.4.8
 matplotlib==3.10.5

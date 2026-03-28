@@ -66,7 +66,7 @@ class SoftmaxStatsScope:
         if not getattr(args, "softmax_stats", False):
             return
 
-        from flatquant.softmax_stats import SoftmaxStatsCollector, SoftmaxStatsConfig
+        from softmax_stats import SoftmaxStatsCollector, SoftmaxStatsConfig
 
         self.softmax_stats = SoftmaxStatsCollector(
             SoftmaxStatsConfig(
@@ -442,6 +442,7 @@ def parse_args():
     parser.add_argument("--lm_eval_batch_size", type=int, default=16)
     parser.add_argument("--num_fewshot", type=int, default=0)
     parser.add_argument("--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"])
+    parser.add_argument("--skip_quantize", action="store_true", help="Skip reorder/quantize; run raw bf16 model.")
     parser.add_argument("--quant_type", type=str, default="NVFP4", choices=["NVFP4", "MXFP4", "INT4", "HiF4"])
     parser.add_argument("--no_xw_reorder", action="store_true")
     parser.add_argument("--use_x_mask", action="store_true")
@@ -519,38 +520,45 @@ def main():
     select_num_filename = f"./saved/{model_name.lower()}_select_num_{dataset_name}_{args.act_sort_metric}.pt"
     act_scales_filename = f"./saved/{model_name.lower()}_act_scales_{dataset_name}_{args.act_sort_metric}.pt"
 
-    assert os.path.isfile(index_filename), "reorder index file not found."
+    if args.skip_quantize:
+        logger.info("skip_quantize=True: skipping reorder/quantize, running raw bf16 model.")
+        torch.cuda.reset_max_memory_allocated()
+        start_time = end_time = time.time()
+        model.to(DEV)
+        peak_memory = torch.cuda.max_memory_allocated()
+    else:
+        assert os.path.isfile(index_filename), "reorder index file not found."
 
-    logger.info("Loading cached reording index from disk...")
-    reorder_index = torch.load(index_filename, weights_only=False)
-    select_nums = torch.load(select_num_filename, weights_only=False)
-    _ = torch.load(act_scales_filename, weights_only=False)
+        logger.info("Loading cached reording index from disk...")
+        reorder_index = torch.load(index_filename, weights_only=False)
+        select_nums = torch.load(select_num_filename, weights_only=False)
+        _ = torch.load(act_scales_filename, weights_only=False)
 
-    torch.cuda.reset_max_memory_allocated()
-    logger.info("Reordering model...")
-    start_time = time.time()
-    reorder_kwargs = {
-        "device": DEV,
-        "kv_cache": args.kv_cache,
-        "reorder_index": reorder_index,
-        "select_nums": select_nums,
-        "quant_type": args.quant_type,
-        "reorder_xw": not bool(args.no_xw_reorder),
-        "use_x_mask": bool(args.use_x_mask),
-        "x_mask_tau": float(args.x_mask_tau),
-        "x_mask_alpha": float(args.x_mask_alpha),
-        "x_mask_skip_layers": args.x_mask_skip_layers,
-        "x_mask_r_thr": None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr),
-    }
-    if "llama" in args.model.lower():
-        reorder_kwargs["rec"] = bool(args.rec)
-    model = reorder_model_func(
-        model,
-        **reorder_kwargs,
-    )
-    model.eval()
-    end_time = time.time()
-    peak_memory = torch.cuda.max_memory_allocated()
+        torch.cuda.reset_max_memory_allocated()
+        logger.info("Reordering model...")
+        start_time = time.time()
+        reorder_kwargs = {
+            "device": DEV,
+            "kv_cache": args.kv_cache,
+            "reorder_index": reorder_index,
+            "select_nums": select_nums,
+            "quant_type": args.quant_type,
+            "reorder_xw": not bool(args.no_xw_reorder),
+            "use_x_mask": bool(args.use_x_mask),
+            "x_mask_tau": float(args.x_mask_tau),
+            "x_mask_alpha": float(args.x_mask_alpha),
+            "x_mask_skip_layers": args.x_mask_skip_layers,
+            "x_mask_r_thr": None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr),
+        }
+        if "llama" in args.model.lower():
+            reorder_kwargs["rec"] = bool(args.rec)
+        model = reorder_model_func(
+            model,
+            **reorder_kwargs,
+        )
+        model.eval()
+        end_time = time.time()
+        peak_memory = torch.cuda.max_memory_allocated()
 
     if args.use_x_mask and args.x_mask_ckpt:
         meta = load_x_mask_checkpoint(model, args.x_mask_ckpt)
@@ -579,11 +587,12 @@ def main():
             # if args.x_mask_eval_hard:
                 set_layer_x_mask_eval_mode(layer, True)
 
-    logger.info(f"Quantized Model Size: {peak_memory / (1024 * 1024 * 1024):.2f} GB")
-    logger.info(f"Quantized Type is: {args.quant_type}")
+    logger.info(f"Model Size: {peak_memory / (1024 * 1024 * 1024):.2f} GB")
+    logger.info(f"Quant Type: {args.quant_type if not args.skip_quantize else 'bf16 (no quant)'}")
     logger.info(f"Total time taken: {end_time - start_time:.2f} seconds")
 
-    model.to(DEV)
+    if not args.skip_quantize:
+        model.to(DEV)
     _register_log_hooks(model, logger, args)
 
     tokenizer = None
@@ -601,18 +610,18 @@ def main():
         import numpy as np
         from lm_eval import utils as lm_eval_utils
         from lm_eval.models.huggingface import HFLM
-        from lm_eval.tasks import initialize_tasks
+        from lm_eval.tasks import TaskManager
         from transformers import AutoTokenizer
 
         if tokenizer is None:
             tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, legacy=False)
 
-        initialize_tasks()
+        task_manager = TaskManager()
         task_patterns = []
         for item in args.tasks:
             task_patterns.extend([x.strip() for x in str(item).split(",") if x.strip()])
 
-        task_names = sorted(set(lm_eval_utils.pattern_match(task_patterns, lm_eval.tasks.ALL_TASKS)))
+        task_names = sorted(set(lm_eval_utils.pattern_match(task_patterns, task_manager.all_tasks)))
         results_by_task = {}
         with SoftmaxStatsScope(args, logger, model=model):
             for task_name in task_names:
