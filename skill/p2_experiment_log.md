@@ -102,7 +102,7 @@ CUDA_VISIBLE_DEVICES=2 python -u model/cali_joint.py /data/shichao/models/Llama-
 
 ## P2-C：解耦训练（wikitext2）
 
-**假设**：joint 同时训练 gates + alpha 导致 co-adaptation。
+**假设**：joint 同时训练 gates + softmax_alpha 导致 co-adaptation。
 - Phase 1（gate-only, 20 epochs）：alpha 冻结在 1.0，gates 单独对 bf16 MSE 最小化
 - Phase 2（alpha-only, 15 epochs）：gates 冻结，alpha 单独补偿 gate 引入的 distortion
 
@@ -127,20 +127,24 @@ CUDA_VISIBLE_DEVICES=0 python -u model/cali_joint.py /data/shichao/models/Llama-
 | 日志 | `results/logs/p2c_cali_decouple.log` |
 | 输出 ckpt | `outputs/Llama-3.1-8B/NVFP4/joint_decouple_{datetime}/llama-3.1-8b_joint_wikitext2_max_NVFP4.pt` |
 | 启动时间 | 2026-03-27 03:30 UTC |
-| 状态 | 🔄 running |
+| 状态 | ✅ done |
 
-### 结果（待填）
+### 结果
 | Task | bf16 | nvfp4 | joint_v1 | **joint_decouple** | Δ vs joint |
 |------|------|-------|----------|-------------------|------------|
-| arc_challenge | 0.5316 | 0.5145 | 0.5068 | TBD | — |
-| rte | 0.7004 | 0.6859 | 0.6643 | TBD | — |
-| ceval-valid | 0.5245 | 0.4844 | 0.4190 | TBD | — |
+| arc_challenge | 0.5316 | 0.5145 | 0.5068 | **0.4906** | −1.62% |
+| rte | 0.7004 | 0.6859 | 0.6643 | **0.6570** | −0.73% |
+| ceval-valid | 0.5245 | 0.4844 | 0.4190 | **0.4361** | +1.71% |
+
+**补充**：该 ckpt 仅包含 `softmax_alpha`，**不包含 `output_scale`**。
+
+**结论**：解耦训练没有缓解 ARC 退化，反而比 `joint_v1` 更差；但 ceval-valid 有一定恢复，说明 `softmax_alpha` 的第二阶段补偿能修一部分任务分布偏移，无法解决 ARC 的核心问题。
 
 ---
 
 ## P2-D：任务混合校准数据（arc_mix）
 
-**假设**：用 arc_challenge train + arc_easy train + rte train 混合文本作为 calibration 数据，使 gates 和 alpha 在 MCQ/NLI 任务格式的 activations 上训练，改善对这些 benchmark 的泛化。
+**假设**：用 arc_challenge train + arc_easy train + rte train 混合文本作为 calibration 数据，使 gates 和 `softmax_alpha` 在 MCQ/NLI 任务格式的 activations 上训练，改善对这些 benchmark 的泛化。
 
 **变更**：`--dataset arc_mix`（其余与 joint_v1 相同，30 epochs joint）
 
@@ -165,16 +169,46 @@ CUDA_VISIBLE_DEVICES=1 python -u model/cali_joint.py /data/shichao/models/Llama-
 | 日志 | `results/logs/p2d_cali_arc_mix.log` |
 | 输出 ckpt | `outputs/Llama-3.1-8B/NVFP4/joint_arc_mix_{datetime}/llama-3.1-8b_joint_arc_mix_max_NVFP4.pt` |
 | 启动时间 | 2026-03-27 03:30 UTC |
-| 状态 | 🔄 running |
+| 状态 | ✅ done |
 
-### 结果（待填）
+### 结果
 | Task | bf16 | nvfp4 | joint_v1 | **joint_arc_mix** | Δ vs joint |
 |------|------|-------|----------|------------------|------------|
-| arc_challenge | 0.5316 | 0.5145 | 0.5068 | TBD | — |
-| rte | 0.7004 | 0.6859 | 0.6643 | TBD | — |
-| ceval-valid | 0.5245 | 0.4844 | 0.4190 | TBD | — |
+| arc_challenge | 0.5316 | 0.5145 | 0.5068 | **0.4983** | −0.85% |
+| rte | 0.7004 | 0.6859 | 0.6643 | **0.6787** | +1.44% |
+| ceval-valid | 0.5245 | 0.4844 | 0.4190 | **0.4458** | +2.67% |
 
-**状态**：⏳ 等待完成
+**补充**：该 ckpt 仅包含 `softmax_alpha`，**不包含 `output_scale`**。
+
+**结论**：`arc_mix` 对任务格式更匹配，确实提升了 `rte` 和 `ceval-valid`，但 ARC 仍低于 `joint_v1`。这说明“换 calibration 数据”更像是在做任务特化，而不是提升通用的 ARC 鲁棒性。
+
+---
+
+## P2-E：joint_plus（补充实验，加入 output_scale）
+
+**定位**：该实验不属于 `P2-C / P2-D` 主线结果，而是用于单独验证 `output_scale` 是否带来额外补偿能力。
+
+**关键区别**：
+- `P2-C joint_decouple` / `P2-D joint_arc_mix` 的 ckpt 只有 `softmax_alpha`
+- `joint_plus` 的 ckpt 同时包含 `softmax_alpha + output_scale`
+
+**ckpt 结构证明**：
+- `joint_decouple`: `['layers', 'meta', 'softmax_alpha']`
+- `joint_arc_mix`: `['layers', 'meta', 'softmax_alpha']`
+- `joint_plus`: `['layers', 'meta', 'output_scale', 'softmax_alpha']`
+
+**当前状态**：
+- ckpt 已完成：`outputs/Llama-3.1-8B/NVFP4/joint_plus_20260327_040637/llama-3.1-8b_joint_wikitext2_max_NVFP4.pt`
+- 评测完成：`results/joint_plus_eval.json`
+
+### 结果
+| Task | bf16 | nvfp4 | joint_v1 | **joint_plus** | Δ vs joint_v1 |
+|------|------|-------|----------|----------------|----------------|
+| arc_challenge | 0.5316 | 0.5145 | 0.5068 | **0.5111** | +0.43% |
+| rte | 0.7004 | 0.6859 | 0.6643 | **0.6787** | +1.44% |
+| ceval-valid | 0.5245 | 0.4844 | 0.4190 | **0.4510** | +3.19% |
+
+**结论**：`joint_plus` 是目前第一个在 ARC 上超过 `joint_v1` 的补偿版本，说明 `output_scale` 确实提供了额外收益；同时 `rte` 和 `ceval-valid` 也同步提升。虽然 ARC 仍略低于 `nvfp4` (`0.5111 < 0.5145`)，但已经明显优于只用 `softmax_alpha` 的 `P2-C / P2-D`。
 
 ---
 
@@ -188,14 +222,19 @@ CUDA_VISIBLE_DEVICES=1 python -u model/cali_joint.py /data/shichao/models/Llama-
 | joint_wiki_reg001 | **0.5068** | 0.6643 | 0.4190 | −2.47% | baseline |
 | joint_wiki_reg010 (P2-B) | 0.4863 | 0.6787 | 0.4383 | −4.21% | −2.05% ↓ |
 | joint_c4_reg001 (P2-A) | 0.4812 | 0.6931 | 0.4421 | −4.89% | −2.56% ↓ |
+| joint_decouple (P2-C) | 0.4906 | 0.6570 | 0.4361 | −4.10% | −1.62% ↓ |
+| joint_arc_mix (P2-D) | 0.4983 | **0.6787** | **0.4458** | −3.27% | −0.85% ↓ |
+| joint_plus (P2-E) | **0.5111** | **0.6787** | **0.4510** | −1.97% | **+0.43%** |
 
 **目标线**：arc_norm ≥ 0.5263（bf16 −1%）
 
 ### P2 结论
-- joint_v1 (wiki, reg=0.01) 仍是最好的 arc_challenge 配置
-- P2 两个方向（换数据、加正则）均未能提升 arc，反而变差
-- 问题根源：x_mask 2:4 sparsity 天花板约束，softmax_alpha 微调空间有限
-- **下一步**：考虑从架构层面改变，如 P2-C 解耦训练，或放弃 joint 思路，探索其他补偿机制
+- `joint_plus` (加入 `output_scale`) 是当前最好的 `joint` 系配置，首次在 ARC 上超过 `joint_v1`
+- `P2-C` 解耦训练没有改善 ARC，说明 co-adaptation 不是主瓶颈
+- `P2-D` `arc_mix` 能提升 `rte / ceval-valid`，但无法超过 `joint_v1` 的 ARC
+- 问题根源更像是：`x_mask` 2:4 sparsity 天花板 + 当前 teacher/目标函数不匹配；仅靠 `softmax_alpha` 的补偿空间有限
+- `joint_plus` 证明 `output_scale` 是有效补偿项，能同时改善 `ARC / RTE / CEval`
+- **下一步**：优先转向 `bf16 teacher` / mixed-teacher 这类目标函数修正实验，而不是继续在 `P2` 范围内微调超参
 
 ### LongBench（joint vs nvfp4）
 | Task | nvfp4 | joint | Δ |

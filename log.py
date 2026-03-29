@@ -301,6 +301,7 @@ def _log_xq_stats(
     out_dir=None,
     bins=120,
     max_points=200_000,
+    select_num=0,
 ):
     if tag in logged:
         return
@@ -308,15 +309,21 @@ def _log_xq_stats(
         total = x_q.numel()
         if total == 0:
             return
-        zeros = (x_q == 0)
+        # Exclude residual correction channels (last select_num cols) from
+        # sparsity statistics — they bypass x_mask and are always non-sparse.
+        if select_num > 0 and x_q.dim() >= 2:
+            x_orig = x_q[:, :-select_num]
+        else:
+            x_orig = x_q
+        zeros = (x_orig == 0)
         zero_ratio = zeros.float().mean().item()
-        if x_q.shape[-1] % 4 == 0:
-            g = x_q.reshape(-1, x_q.shape[-1] // 4, 4)
+        if x_orig.shape[-1] % 4 == 0:
+            g = x_orig.reshape(-1, x_orig.shape[-1] // 4, 4)
             zeros_g = (g == 0).sum(dim=-1)
             two_zeros_ratio = (zeros_g >= 2).float().mean().item()
-            logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f}, two_zeros_ratio={two_zeros_ratio:.6f}")
+            logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f}, two_zeros_ratio={two_zeros_ratio:.6f} (orig_channels={x_orig.shape[-1]}, residual={select_num})")
         else:
-            logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f} (last dim not divisible by 4)")
+            logger.info(f"[{tag}] zero_ratio={zero_ratio:.6f} (last dim not divisible by 4, orig_channels={x_orig.shape[-1]}, residual={select_num})")
 
         if out_dir is not None:
             try:
@@ -396,7 +403,8 @@ def _register_log_hooks(model, logger, args):
             x_q = packed[0]
             if not torch.is_tensor(x_q):
                 return
-            _log_xq_stats(x_q, tag=_name, logger=logger, logged=logged, out_dir=plot_dir)
+            sel = getattr(_module, "select_num", 0) or 0
+            _log_xq_stats(x_q, tag=_name, logger=logger, logged=logged, out_dir=plot_dir, select_num=sel)
 
         module.register_forward_pre_hook(pre_hook)
 

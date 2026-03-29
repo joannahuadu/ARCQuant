@@ -140,6 +140,9 @@ def main():
                         help="Separate LR for alpha params. <0 means use --lr.")
     parser.add_argument("--alpha_reg", type=float, default=0.01,
                         help="Regularization weight: lambda * (alpha - 1)^2")
+    parser.add_argument("--teacher_dtype", type=str, default="nvfp4",
+                        choices=["nvfp4", "bf16", "mixed"],
+                        help="Teacher target for layer-wise distillation: quantized dense nvfp4, raw bf16, or mixed (gate->nvfp4, alpha/output_scale->bf16).")
 
     # Decoupled training: first train gates (alpha frozen at 1), then alpha (gates frozen)
     parser.add_argument("--decouple_training", action="store_true",
@@ -150,6 +153,9 @@ def main():
                         help="Epochs for alpha-only phase. -1 = use --epochs.")
 
     args = parser.parse_args()
+
+    if args.teacher_dtype == "mixed" and not args.decouple_training:
+        raise ValueError("--teacher_dtype mixed currently requires --decouple_training so gate and alpha phases can use different teachers.")
 
     args.exp_name = f"{args.exp_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     args.model_name = args.model.split("/")[-1]
@@ -176,6 +182,14 @@ def main():
     model, reorder_model_func = _get_model(args.model)
     model.eval()
     model.config.use_cache = False
+
+    teacher_model = None
+    teacher_layers = None
+    if args.teacher_dtype in {"bf16", "mixed"}:
+        teacher_model, _ = _get_model(args.model)
+        teacher_model.eval()
+        teacher_model.config.use_cache = False
+        teacher_layers = teacher_model.model.layers
 
     x_mask_r_thr = None if args.x_mask_r_thr < 0 else float(args.x_mask_r_thr)
 
@@ -275,6 +289,8 @@ def main():
 
     fp_inps = inps
     fp_outs = torch.zeros_like(inps)
+    teacher_inps = inps.detach().cpu() if args.teacher_dtype in {"bf16", "mixed"} else None
+    teacher_outs = torch.zeros_like(teacher_inps) if args.teacher_dtype in {"bf16", "mixed"} else None
 
     loss_func = torch.nn.MSELoss()
     amp_dtype = torch.float32 if args.deactive_amp else torch.bfloat16
@@ -294,25 +310,44 @@ def main():
         print(f"========= Layer {layer_idx} =========")
         layer = layers[layer_idx].to(DEV)
         layer.eval()
+        teacher_layer = None
+        if teacher_layers is not None:
+            teacher_layer = teacher_layers[layer_idx].to(DEV)
+            teacher_layer.eval()
 
         # ---- teacher outputs (x_mask disabled, alpha=1) ----
-        set_layer_x_mask_alpha(layer, 0.0)
-        set_layer_x_mask_eval_mode(layer, False)
-        # Reset alpha to 1.0 for teacher
         attn = getattr(layer, "self_attn", None)
-        if attn is not None and hasattr(attn, "softmax_alpha"):
+        if args.teacher_dtype in {"bf16", "mixed"}:
             with torch.no_grad():
-                attn.softmax_alpha.fill_(1.0)
+                for start in range(0, args.nsamples, args.cali_bsz):
+                    x = teacher_inps[start : start + args.cali_bsz].to(DEV)
+                    bs = int(x.shape[0])
+                    am = attention_mask_batch[:bs] if attention_mask_batch is not None else None
+                    pid = position_ids
+                    if pid is not None and pid.shape[0] != bs:
+                        pid = pid.repeat(bs, 1)
+                    teacher_outs[start : start + bs] = teacher_layer(x, attention_mask=am, position_ids=pid)[0].detach().cpu()
 
-        with torch.no_grad():
-            for start in range(0, args.nsamples, args.cali_bsz):
-                x = fp_inps[start : start + args.cali_bsz]
-                bs = int(x.shape[0])
-                am = attention_mask_batch[:bs] if attention_mask_batch is not None else None
-                pid = position_ids
-                if pid is not None and pid.shape[0] != bs:
-                    pid = pid.repeat(bs, 1)
-                fp_outs[start : start + bs] = layer(x, attention_mask=am, position_ids=pid)[0]
+        # nvfp4 teacher: quantized layer with x_mask disabled, alpha=1
+        # For "nvfp4" this is the only teacher; for "mixed" this provides
+        # the gate-phase target (fp_outs) alongside the bf16 teacher_outs.
+        if args.teacher_dtype in {"nvfp4", "mixed"}:
+            set_layer_x_mask_alpha(layer, 0.0)
+            set_layer_x_mask_eval_mode(layer, False)
+            # Reset alpha to 1.0 for teacher
+            if attn is not None and hasattr(attn, "softmax_alpha"):
+                with torch.no_grad():
+                    attn.softmax_alpha.fill_(1.0)
+
+            with torch.no_grad():
+                for start in range(0, args.nsamples, args.cali_bsz):
+                    x = fp_inps[start : start + args.cali_bsz]
+                    bs = int(x.shape[0])
+                    am = attention_mask_batch[:bs] if attention_mask_batch is not None else None
+                    pid = position_ids
+                    if pid is not None and pid.shape[0] != bs:
+                        pid = pid.repeat(bs, 1)
+                    fp_outs[start : start + bs] = layer(x, attention_mask=am, position_ids=pid)[0]
 
         # ---- train student: gates + alpha jointly ----
         set_layer_x_mask_alpha(layer, float(args.x_mask_alpha))
@@ -408,7 +443,8 @@ def main():
                 mse = 0
                 for start in range(0, args.nsamples, args.cali_bsz):
                     x = fp_inps[start : start + args.cali_bsz]
-                    y_ref = fp_outs[start : start + args.cali_bsz]
+                    y_ref = teacher_outs[start : start + args.cali_bsz].to(DEV) if teacher_outs is not None else fp_outs[start : start + args.cali_bsz]
+                    y_ref_nvfp4 = fp_outs[start : start + args.cali_bsz]
                     bs = int(x.shape[0])
                     am = attention_mask_batch[:bs] if attention_mask_batch is not None else None
                     pid = position_ids
@@ -417,7 +453,17 @@ def main():
 
                     with _traincast():
                         y = layer(x, attention_mask=am, position_ids=pid)[0]
-                        loss = loss_func(y, y_ref)
+                        if args.teacher_dtype == "mixed":
+                            loss_gate = loss_func(y, y_ref_nvfp4)
+                            loss_alpha = loss_func(y, y_ref)
+                            if phase_name == "gate-only":
+                                loss = loss_gate
+                            elif phase_name == "alpha-only":
+                                loss = loss_alpha
+                            else:
+                                loss = loss_alpha
+                        else:
+                            loss = loss_func(y, y_ref)
 
                         # Gate sparsity cost
                         if args.gate_cost > 0:
@@ -537,9 +583,15 @@ def main():
                 fp_outs[start : start + bs] = layer(x, attention_mask=am, position_ids=pid)[0]
 
         fp_inps, fp_outs = fp_outs, fp_inps
+        if teacher_outs is not None:
+            teacher_inps, teacher_outs = teacher_outs, teacher_inps
 
         layers[layer_idx] = layer.cpu()
+        if teacher_layer is not None:
+            teacher_layers[layer_idx] = teacher_layer.cpu()
         del layer
+        if teacher_layer is not None:
+            del teacher_layer
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -587,6 +639,7 @@ def main():
                 "trainable_alpha": bool(args.trainable_alpha),
                 "alpha_lr": alpha_lr,
                 "alpha_reg": float(args.alpha_reg),
+                "teacher_dtype": args.teacher_dtype,
                 "joint": True,
             },
             "layers": ckpt_layers,
