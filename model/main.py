@@ -90,7 +90,7 @@ if __name__ == '__main__':
     parser.add_argument('--fewshot_overrides', type=str, default='{"mmlu": 5, "ceval-valid": 5}',
         help='JSON dict of per-task fewshot overrides, e.g. \'{"mmlu": 5, "ceval-valid": 5}\'')
     parser.add_argument(
-        "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval"], 
+        "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval", "arc_mix"], 
         help="The calibration dataset to use."
     )
     parser.add_argument(

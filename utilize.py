@@ -332,15 +332,21 @@ def get_wikitext2(nsamples, seed, seqlen, tokenizer):
     return trainloader, inps 
 
 def get_c4(nsamples, seed, seqlen, tokenizer):
-    from datasets import load_dataset
+    from datasets import Dataset, load_dataset
     import random
     import torch
+    from pathlib import Path
 
-    traindata = load_dataset(
-        'allenai/c4', 'en', 
-        split='validation', 
-        trust_remote_code=True
-    )
+    arrow = Path.home() / ".cache" / "huggingface" / "datasets" / "allenai___c4" / \
+        "default-c7bc8b0aefc5e48f" / "0.0.0" / "1588ec454efa1a09f29cd18ddd04fe05fc8653a2" / "c4-validation.arrow"
+    if arrow.exists():
+        traindata = Dataset.from_file(str(arrow))
+    else:
+        traindata = load_dataset(
+            "allenai/c4", "en",
+            split="validation",
+            trust_remote_code=True,
+        )
     
     random.seed(seed)
     trainloader = []
@@ -354,7 +360,8 @@ def get_c4(nsamples, seed, seqlen, tokenizer):
             encoded = tokenizer(text, return_tensors='pt')
             
             if encoded.input_ids.shape[1] >= seqlen:
-                i = random.randint(0, encoded.input_ids.shape[1] - seqlen - 1)
+                max_start = encoded.input_ids.shape[1] - seqlen
+                i = random.randint(0, max_start) if max_start > 0 else 0
                 inp = encoded.input_ids[:, i : i + seqlen]
                 break
         

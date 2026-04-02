@@ -19,7 +19,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, help="path of the hf model")
 parser.add_argument(
-    "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "humaneval", "pile", "arc_challenge"], 
+    "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "humaneval", "pile", "arc_challenge", "arc_mix"], 
     help="The calibration dataset to use."
 )
 parser.add_argument("--act_sort_metric", type=str, help="the metric used to sort the activations.")
@@ -74,12 +74,87 @@ def get_arc_challenge(nsamples, seed, seqlen, tokenizer):
     return trainloader, inps
 
 
+def get_arc_mix(nsamples, seed, seqlen, tokenizer):
+    import random
+    from pathlib import Path
+    from datasets import Dataset, load_dataset
+
+    def _load_cached_arrow(path_str):
+        path = Path(path_str).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"missing cached dataset file: {path}")
+        return Dataset.from_file(str(path))
+
+    def _load_split(dataset_name, config_name, split, cache_path):
+        try:
+            return load_dataset(dataset_name, config_name, split=split)
+        except Exception:
+            return _load_cached_arrow(cache_path)
+
+    random.seed(seed)
+    texts = []
+
+    arc_c = _load_split(
+        "allenai/ai2_arc",
+        "ARC-Challenge",
+        "train",
+        "~/.cache/huggingface/datasets/allenai___ai2_arc/ARC-Challenge/0.0.0/210d026faf9955653af8916fad021475a3f00453/ai2_arc-train.arrow",
+    )
+    for ex in arc_c:
+        labels = ex["choices"]["label"]
+        texts_choices = ex["choices"]["text"]
+        opts = "\n".join(f"{l}. {t}" for l, t in zip(labels, texts_choices))
+        texts.append(f"Question: {ex['question']}\n{opts}\nAnswer: {ex['answerKey']}")
+
+    arc_e = _load_split(
+        "allenai/ai2_arc",
+        "ARC-Easy",
+        "train",
+        "~/.cache/huggingface/datasets/allenai___ai2_arc/ARC-Easy/0.0.0/210d026faf9955653af8916fad021475a3f00453/ai2_arc-train.arrow",
+    )
+    for ex in arc_e:
+        labels = ex["choices"]["label"]
+        texts_choices = ex["choices"]["text"]
+        opts = "\n".join(f"{l}. {t}" for l, t in zip(labels, texts_choices))
+        texts.append(f"Question: {ex['question']}\n{opts}\nAnswer: {ex['answerKey']}")
+
+    rte = _load_split(
+        "super_glue",
+        "rte",
+        "train",
+        "~/.cache/huggingface/datasets/super_glue/rte/0.0.0/3de24cf8022e94f4ee4b9d55a6f539891524d646/super_glue-train.arrow",
+    )
+    label_map = {0: "yes", 1: "no"}
+    for ex in rte:
+        texts.append(
+            f"Premise: {ex['premise']}\nHypothesis: {ex['hypothesis']}\n"
+            f"Entailment: {label_map.get(ex['label'], 'yes')}"
+        )
+
+    random.shuffle(texts)
+    trainenc = tokenizer("\n\n".join(texts), return_tensors="pt")
+
+    trainloader = []
+    inps = []
+    for _ in range(nsamples):
+        max_start = trainenc.input_ids.shape[1] - seqlen
+        i = random.randint(0, max_start) if max_start > 0 else 0
+        inp = trainenc.input_ids[:, i:i + seqlen]
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+        inps.append(inp)
+
+    return trainloader, inps
+
+
 DATASET_LOADERS = {
     "wikitext2": get_wikitext2,
     "c4": get_c4,
     "pile": get_pile,
     "humaneval": get_humaneval,
     "arc_challenge": get_arc_challenge,
+    "arc_mix": get_arc_mix,
 }
         
 def main():
