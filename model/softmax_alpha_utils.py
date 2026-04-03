@@ -121,10 +121,42 @@ def set_model_output_scale(model, output_scale, *, skip_layers=None) -> torch.Te
     return output_scale
 
 
+def set_model_mlp_output_scale(model, mlp_output_scale, *, skip_layers=None) -> torch.Tensor:
+    """Load per-channel mlp_output_scale [n_layers, hidden_size] into decoder MLP modules."""
+    if hasattr(model, "module"):
+        model = model.module
+    layers = None
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+    elif hasattr(model, "layers"):
+        layers = model.layers
+    if layers is None:
+        return torch.as_tensor(mlp_output_scale, dtype=torch.float32)
+
+    skip_layers = parse_layer_spec(skip_layers)
+    mlp_output_scale = torch.as_tensor(mlp_output_scale, dtype=torch.float32)
+    if mlp_output_scale.dim() == 1:
+        mlp_output_scale = mlp_output_scale.unsqueeze(0).expand(len(layers), -1)
+
+    for layer_idx, layer in enumerate(layers):
+        mlp = getattr(layer, "mlp", None)
+        if mlp is None or not hasattr(mlp, "mlp_output_scale"):
+            continue
+        if layer_idx in skip_layers:
+            mlp.mlp_output_scale.fill_(1.0)
+            continue
+        mlp.mlp_output_scale.copy_(
+            mlp_output_scale[layer_idx].to(device=mlp.mlp_output_scale.device, dtype=mlp.mlp_output_scale.dtype)
+        )
+    return mlp_output_scale
+
+
 def load_softmax_alpha_checkpoint(model, path: str, *, skip_layers=None):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     meta = ckpt.get("meta", {}) if isinstance(ckpt, dict) else {}
     alpha = set_model_softmax_alpha(model, ckpt, skip_layers=skip_layers)
     if isinstance(ckpt, dict) and "output_scale" in ckpt:
         set_model_output_scale(model, ckpt["output_scale"], skip_layers=skip_layers)
+    if isinstance(ckpt, dict) and "mlp_output_scale" in ckpt:
+        set_model_mlp_output_scale(model, ckpt["mlp_output_scale"], skip_layers=skip_layers)
     return {"path": path, "shape": list(alpha.shape), **meta}

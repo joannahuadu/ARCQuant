@@ -99,6 +99,8 @@ class XMaskSwitchTop2Hard(nn.Module):
         self.x_mask_tau = float(x_mask_tau)
         self.x_mask_alpha = float(x_mask_alpha)
         self.x_mask_r_thr = x_mask_r_thr
+        self.x_mask_train_hard_r_thr = False
+        self.x_mask_r_thr_ste_tau = 0.1
 
         num_groups = hidden_dim // group_size
         self.x_mask_gate_logits = nn.Parameter(torch.zeros((num_groups,), dtype=torch.float32), requires_grad=True)
@@ -238,8 +240,18 @@ class XMaskSwitchTop2Hard(nn.Module):
         r = r.to(dtype=reshaped.dtype).unsqueeze(-1)  # [*, G, 1]
         mixed = r * reshaped + (1.0 - r) * x_sp
 
-        # Optional hard switch at eval time: enforce true 2:4 sparsity.
+        # Optional hard switch during training via STE. Forward uses a true threshold,
+        # backward uses a smooth surrogate around the threshold.
         r_thr = self.x_mask_r_thr
+        if not getattr(self, "_eval_mode", False) and r_thr is not None and bool(getattr(self, "x_mask_train_hard_r_thr", False)):
+            ste_tau = max(float(getattr(self, "x_mask_r_thr_ste_tau", 0.1)), 1e-6)
+            soft_sel = torch.sigmoid((float(r_thr) - r_fp32) / ste_tau)
+            hard_sel = (r_fp32 < float(r_thr)).to(dtype=soft_sel.dtype)
+            sel = hard_sel - soft_sel.detach() + soft_sel
+            sel = sel.to(dtype=mixed.dtype).unsqueeze(-1)
+            mixed = mixed * (1.0 - sel + sel * gate_raw)
+
+        # Optional hard switch at eval time: enforce true 2:4 sparsity.
         if getattr(self, "_eval_mode", False) and r_thr is not None:
             hard_sel = (r_fp32 < float(r_thr)).to(dtype=mixed.dtype).unsqueeze(-1)
             mixed = mixed * (1.0 - hard_sel + hard_sel * gate_raw)

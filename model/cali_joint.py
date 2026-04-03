@@ -105,6 +105,12 @@ def main():
     parser.add_argument("--x_mask_alpha", type=float, default=1.0)
     parser.add_argument("--x_mask_skip_layers", type=str, default="")
     parser.add_argument("--x_mask_r_thr", type=float, default=-1.0)
+    parser.add_argument("--x_mask_train_hard_r_thr", action="store_true",
+                        help="Enable training-time hard switch for x_mask_r_thr using STE.")
+    parser.add_argument("--x_mask_r_thr_ste_tau", type=float, default=0.1,
+                        help="STE surrogate temperature for training-time x_mask_r_thr.")
+    parser.add_argument("--rec", action="store_true",
+                        help="Preserve pre-mask reconstruction channels for x_rec when x-mask is enabled.")
 
     # token gate config
     parser.add_argument("--x_mask_token_gate_mode", type=str, default="token_all",
@@ -208,7 +214,7 @@ def main():
         "x_mask_r_thr": x_mask_r_thr,
     }
     if "llama" in args.model.lower():
-        reorder_kwargs["rec"] = False
+        reorder_kwargs["rec"] = bool(args.rec)
     model = reorder_model_func(model, **reorder_kwargs)
 
     x_mask_token_mlp_shared = True
@@ -235,6 +241,13 @@ def main():
         x_mask_token_mlp_shared=bool(x_mask_token_mlp_shared),
         x_mask_token_use_layer_scale=bool(x_mask_token_use_layer_scale),
     )
+
+    if x_mask_r_thr is not None:
+        for layer in model.model.layers:
+            for xm in iter_layer_x_mask_modules(layer):
+                xm.x_mask_r_thr = x_mask_r_thr
+                xm.x_mask_train_hard_r_thr = bool(args.x_mask_train_hard_r_thr)
+                xm.x_mask_r_thr_ste_tau = float(args.x_mask_r_thr_ste_tau)
 
     print("Catching first-layer inputs...")
     trainloader, _, _ = get_loaders(
@@ -303,6 +316,7 @@ def main():
     ckpt_layers = {}
     alpha_by_layer = {}
     scale_by_layer = {}
+    mlp_scale_by_layer = {}
     alpha_lr = float(args.alpha_lr) if args.alpha_lr > 0 else float(args.lr)
 
     print("Start JOINT calibration (x_mask gates + softmax_alpha)...")
@@ -391,6 +405,10 @@ def main():
             if hasattr(attn, "output_scale"):
                 attn.output_scale.requires_grad_(True)
                 trainable_alpha.append(attn.output_scale)
+        mlp = getattr(layer, "mlp", None)
+        if args.trainable_alpha and mlp is not None and hasattr(mlp, "mlp_output_scale"):
+            mlp.mlp_output_scale.requires_grad_(True)
+            trainable_alpha.append(mlp.mlp_output_scale)
 
         trainable_gate = _unique_params(trainable_gate)
         trainable_alpha = _unique_params(trainable_alpha)
@@ -496,6 +514,9 @@ def main():
                             if attn is not None and hasattr(attn, "output_scale"):
                                 scale_dev = attn.output_scale.float() - 1.0
                                 loss = loss + args.alpha_reg * (scale_dev * scale_dev).mean()
+                            if mlp is not None and hasattr(mlp, "mlp_output_scale"):
+                                mlp_scale_dev = mlp.mlp_output_scale.float() - 1.0
+                                loss = loss + args.alpha_reg * (mlp_scale_dev * mlp_scale_dev).mean()
 
                     mse += loss.detach().cpu()
                     loss = loss / loss.clone().detach().clamp_min(1e-12)
@@ -544,6 +565,12 @@ def main():
                             f"output_scale: mean={s.mean():.4f} min={s.min():.4f} max={s.max():.4f} "
                             f"std={s.std():.4f} |s-1|_mean={(s-1).abs().mean():.4f}"
                         )
+                    if mlp is not None and hasattr(mlp, "mlp_output_scale"):
+                        ms = mlp.mlp_output_scale.detach().float()
+                        logger.info(
+                            f"mlp_output_scale: mean={ms.mean():.4f} min={ms.min():.4f} max={ms.max():.4f} "
+                            f"std={ms.std():.4f} |s-1|_mean={(ms-1).abs().mean():.4f}"
+                        )
 
         # ---- cleanup optimizer and cached graph refs ----
         for _, _opt, _ in phase_schedule:
@@ -568,6 +595,9 @@ def main():
         if attn is not None and hasattr(attn, "output_scale"):
             scale_by_layer[layer_idx] = attn.output_scale.detach().cpu().clone()
             attn.output_scale.requires_grad_(False)
+        if mlp is not None and hasattr(mlp, "mlp_output_scale"):
+            mlp_scale_by_layer[layer_idx] = mlp.mlp_output_scale.detach().cpu().clone()
+            mlp.mlp_output_scale.requires_grad_(False)
 
         # ---- next layer inputs ----
         # Use the TRAINED student output (with x_mask + alpha) as input to next layer
@@ -617,6 +647,16 @@ def main():
     for i, s in scale_by_layer.items():
         output_scale[i] = s.view(-1)
 
+    hidden_size_mlp_ckpt = None
+    for v in mlp_scale_by_layer.values():
+        hidden_size_mlp_ckpt = v.numel()
+        break
+    if hidden_size_mlp_ckpt is None:
+        hidden_size_mlp_ckpt = 1
+    mlp_output_scale = torch.ones((n_layers, hidden_size_mlp_ckpt), dtype=torch.float32)
+    for i, s in mlp_scale_by_layer.items():
+        mlp_output_scale[i] = s.view(-1)
+
     # ---- Save checkpoint ----
     out_path = os.path.join(args.exp_dir, f"{model_name.lower()}_joint_{dataset_name}_{args.act_sort_metric}_{args.quant_type}.pt")
     torch.save(
@@ -629,6 +669,8 @@ def main():
                 "x_mask_tau": float(args.x_mask_tau),
                 "x_mask_alpha": float(args.x_mask_alpha),
                 "x_mask_r_thr": x_mask_r_thr,
+                "x_mask_train_hard_r_thr": bool(args.x_mask_train_hard_r_thr),
+                "x_mask_r_thr_ste_tau": float(args.x_mask_r_thr_ste_tau),
                 "x_mask_token_gate_mode": args.x_mask_token_gate_mode,
                 "x_mask_token_gate_deep_ratio": float(args.x_mask_token_gate_deep_ratio),
                 "x_mask_token_gate_deep_start": int(args.x_mask_token_gate_deep_start),
@@ -645,12 +687,14 @@ def main():
             "layers": ckpt_layers,
             "softmax_alpha": softmax_alpha,
             "output_scale": output_scale,
+            "mlp_output_scale": mlp_output_scale,
         },
         out_path,
     )
     print(f"Saved joint checkpoint: {out_path}")
     print(f"softmax_alpha:  mean={softmax_alpha.mean():.4f} min={softmax_alpha.min():.4f} max={softmax_alpha.max():.4f}")
     print(f"output_scale:   mean={output_scale.mean():.4f} min={output_scale.min():.4f} max={output_scale.max():.4f}")
+    print(f"mlp_output_scale: mean={mlp_output_scale.mean():.4f} min={mlp_output_scale.min():.4f} max={mlp_output_scale.max():.4f}")
 
 
 if __name__ == "__main__":

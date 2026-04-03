@@ -547,6 +547,8 @@ class QLlamaMLP(nn.Module):
             quant_type=self.quant_type,
             reorder_xw=self.reorder_xw,
         )
+        # Per-channel output scale applied after the dense down_proj output.
+        self.register_buffer("mlp_output_scale", torch.ones(originalMLP.down_proj.out_features, dtype=torch.float32))
         self.act_fn = originalMLP.act_fn
         self.layer_idx = i
         
@@ -599,5 +601,5 @@ class QLlamaMLP(nn.Module):
             rec=self.rec,
         )
         tmpResult = (qx, scale_x, scale, bsz, q_len)
-       
-        return self.down_proj(tmpResult)
+        out = self.down_proj(tmpResult)
+        return out * self.mlp_output_scale.to(out.dtype)
