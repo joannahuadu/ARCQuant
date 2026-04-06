@@ -93,6 +93,8 @@ def main():
     parser.add_argument("--x_mask_token_gate_deep_start", type=int, default=-1)
     parser.add_argument("--x_mask_token_mlp_hidden", type=int, default=0)
     parser.add_argument("--x_mask_token_mlp_chunk_size", type=int, default=1024)
+    parser.add_argument("--train_attn_output_scale", action="store_true")
+    parser.add_argument("--train_mlp_output_scale", action="store_true")
     parser.add_argument("--x_mask_token_mlp_shared", action="store_true")
     parser.add_argument("--x_mask_token_no_mlp_shared", action="store_true")
     parser.add_argument("--x_mask_token_use_layer_scale", action="store_true")
@@ -136,7 +138,8 @@ def main():
         token_mlp_hidden=int(args.x_mask_token_mlp_hidden),
         token_mlp_chunk_size=int(args.x_mask_token_mlp_chunk_size),
         token_use_layer_scale=not bool(args.x_mask_token_no_layer_scale),
-        use_mlp_output_scale=False,
+        use_mlp_output_scale=args.train_mlp_output_scale,
+        use_attn_output_scale=args.train_attn_output_scale,
     )
 
     x_mask_token_mlp_shared = True
@@ -192,7 +195,6 @@ def main():
             raise ValueError
 
     layers[0] = Catcher(layers[0])
-
     with torch.no_grad():
         for batch in trainloader:
             if cache["i"] >= args.nsamples:
@@ -256,7 +258,7 @@ def main():
                 with torch.no_grad():
                     xm.x_mask_gate_logits.zero_()
 
-        trainable, _ = split_bf16_joint_params(layer, train_alpha=False)
+        trainable, _ = split_bf16_joint_params(layer, train_alpha=False, train_attn_output_scale=args.train_attn_output_scale, train_mlp_output_scale=args.train_mlp_output_scale)
         filtered = []
         for param in trainable:
             owner_ok = False
@@ -316,12 +318,12 @@ def main():
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     optimizer.step()
-                    # Release cached per-forward x_mask tensors so the previous step's
-                    # autograd graph does not survive into the next iteration.
-                    for xm in iter_layer_x_mask_modules(layer):
-                        for attr in list(vars(xm)):
-                            if attr.startswith("_last_x_mask"):
-                                setattr(xm, attr, None)
+                    # # Release cached per-forward x_mask tensors so the previous step's
+                    # # autograd graph does not survive into the next iteration.
+                    # for xm in iter_layer_x_mask_modules(layer):
+                    #     for attr in list(vars(xm)):
+                    #         if attr.startswith("_last_x_mask"):
+                    #             setattr(xm, attr, None)
 
                 cur_lr = optimizer.param_groups[0]["lr"] if len(optimizer.param_groups) > 0 else float("nan")
                 logger.info(f"layer {layer_idx} iter {epoch}, lr {cur_lr:.8f}, mse: {mse:.8f}")

@@ -77,9 +77,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model", type=str)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval", "arc_mix"])
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="wikitext2",
+        choices=["wikitext2", "c4", "pile", "humaneval", "arc_mix"],
+    )
     parser.add_argument("--output_dir", type=str, default="./outputs")
-    parser.add_argument("--exp_name", type=str, default="joint_bf16_hook")
+    parser.add_argument("--exp_name", type=str, default="joint_bf16")
     parser.add_argument("--x_mask_tau", type=float, default=1.0)
     parser.add_argument("--x_mask_alpha", type=float, default=1.0)
     parser.add_argument("--x_mask_r_thr", type=float, default=-1.0)
@@ -88,6 +93,8 @@ def main():
     parser.add_argument("--x_mask_token_gate_deep_start", type=int, default=-1)
     parser.add_argument("--x_mask_token_mlp_hidden", type=int, default=0)
     parser.add_argument("--x_mask_token_mlp_chunk_size", type=int, default=1024)
+    parser.add_argument("--train_attn_output_scale", action="store_true")
+    parser.add_argument("--train_mlp_output_scale", action="store_true")
     parser.add_argument("--x_mask_token_mlp_shared", action="store_true")
     parser.add_argument("--x_mask_token_no_mlp_shared", action="store_true")
     parser.add_argument("--x_mask_token_use_layer_scale", action="store_true")
@@ -104,14 +111,6 @@ def main():
     parser.add_argument("--token_delta_l2", type=float, default=0.0)
     parser.add_argument("--trainable_gate", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--trainable_token_gate", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--trainable_alpha", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument(
-        "--joint_variant",
-        type=str,
-        default="joint_plus",
-        choices=["joint_plus", "joint_plus_plus"],
-        help="`joint_plus` trains x_mask + attention softmax_alpha/output_scale; `joint_plus_plus` additionally trains mlp_output_scale.",
-    )
     parser.add_argument("--reset_gate_logits", action="store_true")
     parser.add_argument("--deactive_amp", action="store_true")
     args = parser.parse_args()
@@ -141,7 +140,8 @@ def main():
         token_mlp_hidden=int(args.x_mask_token_mlp_hidden),
         token_mlp_chunk_size=int(args.x_mask_token_mlp_chunk_size),
         token_use_layer_scale=not bool(args.x_mask_token_no_layer_scale),
-        use_mlp_output_scale=(args.joint_variant == "joint_plus_plus"),
+        use_mlp_output_scale=args.train_mlp_output_scale,
+        use_attn_output_scale=args.train_attn_output_scale,
     )
 
     x_mask_token_mlp_shared = True
@@ -260,8 +260,9 @@ def main():
 
         trainable_gate, trainable_alpha = split_bf16_joint_params(
             layer,
-            train_alpha=bool(args.trainable_alpha),
-            train_mlp_output_scale=(args.joint_variant == "joint_plus_plus"),
+            train_alpha=True,
+            train_attn_output_scale=args.train_attn_output_scale, 
+            train_mlp_output_scale=args.train_mlp_output_scale
         )
         gate_filtered = []
         for param in trainable_gate:
@@ -282,20 +283,18 @@ def main():
                 gate_filtered.append(param)
 
         alpha_filtered = []
-        if args.trainable_alpha:
-            attn = getattr(layer, "self_attn", None)
-            mlp = getattr(layer, "mlp", None)
-            for param in trainable_alpha:
-                if attn is not None and (param is getattr(attn, "softmax_alpha", None) or param is getattr(attn, "output_scale", None)):
-                    param.requires_grad_(True)
-                    alpha_filtered.append(param)
-                elif (
-                    args.joint_variant == "joint_plus_plus"
-                    and mlp is not None
-                    and param is getattr(mlp, "mlp_output_scale", None)
-                ):
-                    param.requires_grad_(True)
-                    alpha_filtered.append(param)
+        attn = getattr(layer, "self_attn", None)
+        mlp = getattr(layer, "mlp", None)
+        for param in trainable_alpha:
+            if attn is not None and (param is getattr(attn, "softmax_alpha", None) or param is getattr(attn, "output_scale", None)):
+                param.requires_grad_(True)
+                alpha_filtered.append(param)
+            elif (
+                mlp is not None
+                and param is getattr(mlp, "mlp_output_scale", None)
+            ):
+                param.requires_grad_(True)
+                alpha_filtered.append(param)
 
         trainable_gate = _unique_params(gate_filtered)
         trainable_alpha = _unique_params(alpha_filtered)
@@ -353,8 +352,7 @@ def main():
                                 loss = loss + args.alpha_reg * (scale_dev * scale_dev).mean()
                             mlp = getattr(layer, "mlp", None)
                             if (
-                                args.joint_variant == "joint_plus_plus"
-                                and mlp is not None
+                                mlp is not None
                                 and hasattr(mlp, "mlp_output_scale")
                             ):
                                 mlp_scale_dev = mlp.mlp_output_scale.float() - 1.0
@@ -365,16 +363,15 @@ def main():
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     optimizer.step()
-                    # Release cached per-forward x_mask tensors so the previous step's
-                    # autograd graph does not survive into the next iteration.
-                    for xm in iter_layer_x_mask_modules(layer):
-                        for attr in list(vars(xm)):
-                            if attr.startswith("_last_x_mask"):
-                                setattr(xm, attr, None)
+                    # # Release cached per-forward x_mask tensors so the previous step's
+                    # # autograd graph does not survive into the next iteration.
+                    # for xm in iter_layer_x_mask_modules(layer):
+                    #     for attr in list(vars(xm)):
+                    #         if attr.startswith("_last_x_mask"):
+                    #             setattr(xm, attr, None)
 
                 cur_lr = optimizer.param_groups[0]["lr"] if len(optimizer.param_groups) > 0 else float("nan")
                 logger.info(f"layer {layer_idx} iter {epoch}, lr {cur_lr:.8f}, mse: {mse:.8f}")
-
                 stats_parts = []
                 for name, mask in (
                     ("self_attn.x_mask_in", getattr(layer.self_attn, "x_mask_in", None)),
@@ -413,8 +410,7 @@ def main():
                     )
                 mlp = getattr(layer, "mlp", None)
                 if (
-                    args.joint_variant == "joint_plus_plus"
-                    and mlp is not None
+                    mlp is not None
                     and hasattr(mlp, "mlp_output_scale")
                 ):
                     ms = mlp.mlp_output_scale.detach().float()
@@ -470,9 +466,10 @@ def main():
             "alpha_reg": float(args.alpha_reg),
             "bf16_hook_mode": True,
             "joint": True,
-            "bf16_variant": args.joint_variant,
+            "bf16_variant": args.exp_name,
+            "train_attn_output_scale": bool(args.train_attn_output_scale),
         },
-        include_mlp_output_scale=(args.joint_variant == "joint_plus_plus"),
+        include_mlp_output_scale=bool(args.train_mlp_output_scale),
     )
     print(f"Saved bf16 joint checkpoint: {out_path}")
 

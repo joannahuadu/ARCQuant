@@ -74,6 +74,7 @@ def _attach_joint_plus_to_attention(
     token_mlp_hidden: int,
     token_mlp_chunk_size: int,
     token_use_layer_scale: bool,
+    use_attn_output_scale: bool,
 ) -> None:
     ref_device = attn.q_proj.weight.device
     attn.x_mask_in = (
@@ -106,7 +107,8 @@ def _attach_joint_plus_to_attention(
         )
 
     attn.register_buffer("softmax_alpha", torch.ones(attn.num_heads, dtype=torch.float32, device=ref_device))
-    attn.register_buffer("output_scale", torch.ones(attn.hidden_size, dtype=torch.float32, device=ref_device))
+    if use_attn_output_scale:
+        attn.register_buffer("output_scale", torch.ones(attn.hidden_size, dtype=torch.float32, device=ref_device))
     attn.joint_plus_enabled = True
     attn._joint_plus_hook_handles = [
         attn.q_proj.register_forward_pre_hook(_make_input_mask_hook(attn, "x_mask_in")),
@@ -114,9 +116,11 @@ def _attach_joint_plus_to_attention(
         attn.v_proj.register_forward_pre_hook(_make_input_mask_hook(attn, "x_mask_in")),
         attn.o_proj.register_forward_pre_hook(_make_input_mask_hook(attn, "x_mask_out")),
         attn.q_proj.register_forward_hook(_make_q_proj_output_hook(attn)),
-        attn.o_proj.register_forward_hook(_make_output_scale_hook(attn, "output_scale")),
     ]
-
+    if use_attn_output_scale:
+        attn._joint_plus_hook_handles.append(
+            attn.o_proj.register_forward_hook(_make_output_scale_hook(attn, "output_scale")),
+        )
 
 def _attach_joint_plus_to_mlp(
     mlp: nn.Module,
@@ -189,6 +193,7 @@ def apply_bf16_joint_plus(
     token_mlp_chunk_size: int = 1024,
     token_use_layer_scale: bool = True,
     use_mlp_output_scale: bool = False,
+    use_attn_output_scale: bool = False,
 ):
     for layer in model.model.layers:
         attn = getattr(layer, "self_attn", None)
@@ -208,6 +213,7 @@ def apply_bf16_joint_plus(
                 token_mlp_hidden=token_mlp_hidden,
                 token_mlp_chunk_size=token_mlp_chunk_size,
                 token_use_layer_scale=token_use_layer_scale,
+                use_attn_output_scale=use_attn_output_scale,
             )
             attn._joint_plus_applied = True
 
@@ -252,7 +258,8 @@ def set_layer_joint_plus_enabled(layer, enabled: bool) -> None:
 def split_bf16_joint_params(
     layer,
     *,
-    train_alpha: bool,
+    train_alpha: bool = False,
+    train_attn_output_scale: bool = False,
     train_mlp_output_scale: bool = False,
 ) -> Tuple[list[nn.Parameter], list[nn.Parameter]]:
     gate_params: list[nn.Parameter] = []
@@ -274,7 +281,7 @@ def split_bf16_joint_params(
         if attn is not None and hasattr(attn, "softmax_alpha"):
             attn.softmax_alpha.requires_grad_(True)
             alpha_params.append(attn.softmax_alpha)
-        if attn is not None and hasattr(attn, "output_scale"):
+        if train_attn_output_scale and attn is not None and hasattr(attn, "output_scale"):
             attn.output_scale.requires_grad_(True)
             alpha_params.append(attn.output_scale)
         mlp = getattr(layer, "mlp", None)
