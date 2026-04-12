@@ -124,6 +124,8 @@ def main():
     parser.add_argument("--x_mask_token_no_mlp_shared", action="store_true")
     parser.add_argument("--x_mask_token_use_layer_scale", action="store_true")
     parser.add_argument("--x_mask_token_no_layer_scale", action="store_true")
+    parser.add_argument("--train_attn_output_scale", action="store_true")
+    parser.add_argument("--train_mlp_output_scale", action="store_true")
 
     # calibration hyperparams
     parser.add_argument("--nsamples", type=int, default=128)
@@ -397,16 +399,16 @@ def main():
                         scale.requires_grad_(True)
                         trainable_gate.append(scale)
 
-        # Collect softmax_alpha + output_scale params
+        # Collect softmax_alpha + optional output_scale params
         if args.trainable_alpha and attn is not None:
             if hasattr(attn, "softmax_alpha"):
                 attn.softmax_alpha.requires_grad_(True)
                 trainable_alpha.append(attn.softmax_alpha)
-            if hasattr(attn, "output_scale"):
+            if args.train_attn_output_scale and hasattr(attn, "output_scale"):
                 attn.output_scale.requires_grad_(True)
                 trainable_alpha.append(attn.output_scale)
         mlp = getattr(layer, "mlp", None)
-        if args.trainable_alpha and mlp is not None and hasattr(mlp, "mlp_output_scale"):
+        if args.trainable_alpha and args.train_mlp_output_scale and mlp is not None and hasattr(mlp, "mlp_output_scale"):
             mlp.mlp_output_scale.requires_grad_(True)
             trainable_alpha.append(mlp.mlp_output_scale)
 
@@ -511,10 +513,10 @@ def main():
                             if attn is not None and hasattr(attn, "softmax_alpha"):
                                 alpha_dev = attn.softmax_alpha.float() - 1.0
                                 loss = loss + args.alpha_reg * (alpha_dev * alpha_dev).mean()
-                            if attn is not None and hasattr(attn, "output_scale"):
+                            if args.train_attn_output_scale and attn is not None and hasattr(attn, "output_scale"):
                                 scale_dev = attn.output_scale.float() - 1.0
                                 loss = loss + args.alpha_reg * (scale_dev * scale_dev).mean()
-                            if mlp is not None and hasattr(mlp, "mlp_output_scale"):
+                            if args.train_mlp_output_scale and mlp is not None and hasattr(mlp, "mlp_output_scale"):
                                 mlp_scale_dev = mlp.mlp_output_scale.float() - 1.0
                                 loss = loss + args.alpha_reg * (mlp_scale_dev * mlp_scale_dev).mean()
 
@@ -679,6 +681,8 @@ def main():
                 "x_mask_token_mlp_shared": bool(x_mask_token_mlp_shared),
                 "x_mask_token_use_layer_scale": bool(x_mask_token_use_layer_scale),
                 "trainable_alpha": bool(args.trainable_alpha),
+                "train_attn_output_scale": bool(args.train_attn_output_scale),
+                "train_mlp_output_scale": bool(args.train_mlp_output_scale),
                 "alpha_lr": alpha_lr,
                 "alpha_reg": float(args.alpha_reg),
                 "teacher_dtype": args.teacher_dtype,

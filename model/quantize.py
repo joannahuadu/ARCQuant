@@ -305,11 +305,11 @@ def fake_reorder_quantize_w(w, reorder_index, select_num, dtype='NVFP4'):
         return q_w.to(orig_dtype), (scale_w * scale).to(orig_dtype), scale.to(orig_dtype)
     else:
         topk_index = torch.arange(w.shape[-1], device=w.device)[-select_num:]
-        # q_w = quantize_func(w_fp32)
-        # inv_index = torch.empty_like(index)
-        # inv_index[index] = torch.arange(index.numel(), device=index.device).to(torch.int32)
-        # q_w = torch.index_select(q_w, 1, inv_index)
-        q_w = torch.cat([quantize_func(w_fp32), quantize_func(w_fp32[:, topk_index])], dim=1) * scale
+        q_w = quantize_func(w_fp32)
+        inv_index = torch.empty_like(index)
+        inv_index[index] = torch.arange(index.numel(), device=index.device).to(torch.int32)
+        q_w = torch.index_select(q_w, 1, inv_index)
+        q_w = torch.cat([q_w, quantize_func(w_fp32[:, topk_index])], dim=1) * scale
         return q_w.to(orig_dtype), (scale_w * scale).to(orig_dtype), scale.to(orig_dtype)
 
 def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4', *, ste: bool = False, x_rec=None):
@@ -349,9 +349,9 @@ def fake_reorder_quantize_x(x, reorder_index, select_num, dtype='NVFP4', *, ste:
             error_e = x_fp32 - q_x
             error_e = error_e[:, topk_index]
         q_error_k = quantize_func(error_e)
-        # inv_index = torch.empty_like(index)
-        # inv_index[index] = torch.arange(index.numel(), device=index.device).to(torch.int32)
-        # q_x = torch.index_select(q_x, 1, inv_index)
+        inv_index = torch.empty_like(index)
+        inv_index[index] = torch.arange(index.numel(), device=index.device).to(torch.int32)
+        q_x = torch.index_select(q_x, 1, inv_index)
         ret_x = torch.cat([q_x, q_error_k], dim=1) * scale
         ret_x = ret_x.to(orig_dtype)
         if ste:
