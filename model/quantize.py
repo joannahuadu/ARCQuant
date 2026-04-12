@@ -12,9 +12,9 @@ def quantize_e2m1(tensor):
         -6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0,
         0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
     ], device=tensor.device, dtype=tensor.dtype)
-    
-    diff = torch.abs(tensor.unsqueeze(-1) - representable_vals)
-    indices = torch.argmin(diff, dim=-1)
+    # Use midpoints for bucketize to avoid expanding tensor by 15x
+    midpoints = (representable_vals[:-1] + representable_vals[1:]) / 2
+    indices = torch.bucketize(tensor, midpoints)
     return representable_vals[indices]
 
 def dequantize_e2m1(tensor):
@@ -25,9 +25,8 @@ def quantize_int4(tensor):
         -8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0,
         0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0
     ], device=tensor.device, dtype=tensor.dtype)
-    
-    diff = torch.abs(tensor.unsqueeze(-1) - representable_vals)
-    indices = torch.argmin(diff, dim=-1)
+    midpoints = (representable_vals[:-1] + representable_vals[1:]) / 2
+    indices = torch.bucketize(tensor, midpoints)
     return representable_vals[indices]
 
 def dequantize_int4(tensor):

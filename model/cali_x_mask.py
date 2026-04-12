@@ -1,4 +1,5 @@
 import argparse
+import gc
 import math
 import os
 from contextlib import nullcontext
@@ -409,6 +410,15 @@ def main():
                     if stats_parts:
                         logger.info("x_mask_gate_stats: " + " | ".join(stats_parts))
 
+        # ---- cleanup optimizer and cached graph refs before saving ----
+        if optimizer is not None:
+            del optimizer
+        del trainable
+        for xm in iter_layer_x_mask_modules(layer):
+            for attr in list(vars(xm)):
+                if attr.startswith("_last_x_mask"):
+                    setattr(xm, attr, None)
+
         # ---- save layer x-mask params ----
         layer_xmask_state = {
             k: v.detach().cpu() for k, v in layer.state_dict().items() if "x_mask" in k
@@ -420,6 +430,7 @@ def main():
 
         layers[layer_idx] = layer.cpu()
         del layer
+        gc.collect()
         torch.cuda.empty_cache()
 
     out_path = os.path.join(args.exp_dir, f"{model_name.lower()}_xmask_{dataset_name}_{args.act_sort_metric}_{args.quant_type}.pt")
