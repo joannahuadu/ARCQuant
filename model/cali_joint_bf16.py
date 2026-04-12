@@ -88,6 +88,8 @@ def main():
     parser.add_argument("--x_mask_tau", type=float, default=1.0)
     parser.add_argument("--x_mask_alpha", type=float, default=1.0)
     parser.add_argument("--x_mask_r_thr", type=float, default=-1.0)
+    parser.add_argument("--x_mask_train_hard_r_thr", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--x_mask_r_thr_ste_tau", type=float, default=0.1)
     parser.add_argument("--x_mask_token_gate_mode", type=str, default="token_all", choices=["static_all", "token_all", "token_deep"])
     parser.add_argument("--x_mask_token_gate_deep_ratio", type=float, default=0.5)
     parser.add_argument("--x_mask_token_gate_deep_start", type=int, default=-1)
@@ -168,6 +170,10 @@ def main():
         x_mask_token_mlp_shared=bool(x_mask_token_mlp_shared),
         x_mask_token_use_layer_scale=bool(x_mask_token_use_layer_scale),
     )
+    for layer in model.model.layers:
+        for xm in iter_layer_x_mask_modules(layer):
+            xm.x_mask_train_hard_r_thr = bool(args.x_mask_train_hard_r_thr)
+            xm.x_mask_r_thr_ste_tau = float(args.x_mask_r_thr_ste_tau)
 
     print("Catching first-layer inputs...")
     trainloader, _, _ = get_loaders(
@@ -455,6 +461,8 @@ def main():
             "x_mask_tau": float(args.x_mask_tau),
             "x_mask_alpha": float(args.x_mask_alpha),
             "x_mask_r_thr": x_mask_r_thr,
+            "x_mask_train_hard_r_thr": bool(args.x_mask_train_hard_r_thr),
+            "x_mask_r_thr_ste_tau": float(args.x_mask_r_thr_ste_tau),
             "x_mask_token_gate_mode": args.x_mask_token_gate_mode,
             "x_mask_token_gate_deep_ratio": float(args.x_mask_token_gate_deep_ratio),
             "x_mask_token_gate_deep_start": int(args.x_mask_token_gate_deep_start),
