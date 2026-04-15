@@ -19,7 +19,16 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, help="path of the hf model")
 parser.add_argument(
-    "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "humaneval", "pile", "arc_challenge", "arc_mix"], 
+    "--dataset", type=str, default="wikitext2", choices=[
+        "wikitext2",
+        "c4",
+        "humaneval",
+        "pile",
+        "arc_challenge",
+        "arc_mix",
+        "wikitext2_c4_mix_1to1",
+        "wikitext2_c4_mix_3to1",
+    ], 
     help="The calibration dataset to use."
 )
 parser.add_argument("--act_sort_metric", type=str, help="the metric used to sort the activations.")
@@ -148,6 +157,67 @@ def get_arc_mix(nsamples, seed, seqlen, tokenizer):
     return trainloader, inps
 
 
+def get_wikitext2_c4_mix(nsamples, seed, seqlen, tokenizer, *, wt_ratio, c4_ratio):
+    from pathlib import Path
+    from datasets import Dataset, concatenate_datasets
+    import random
+
+    def _load_c4_from_cache(split: str):
+        cache_root = Path.home() / ".cache" / "huggingface" / "datasets" / "allenai___c4"
+        if split == "train":
+            base = cache_root / "default-b04fc8a0b8562884" / "0.0.0" / "1588ec454efa1a09f29cd18ddd04fe05fc8653a2"
+            arrow_files = sorted(base.glob("c4-train-*.arrow"))
+        else:
+            raise ValueError(f"unsupported split: {split}")
+
+        if not arrow_files:
+            raise FileNotFoundError(f"no cached C4 arrow files found for split={split} under {base}")
+
+        datasets = [Dataset.from_file(str(p)) for p in arrow_files]
+        return datasets[0] if len(datasets) == 1 else concatenate_datasets(datasets)
+
+    wt_train = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    try:
+        c4_train = load_dataset(
+            "allenai/c4",
+            data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
+            split="train",
+        )
+    except Exception:
+        c4_train = _load_c4_from_cache("train")
+
+    wt_texts = [t for t in wt_train["text"] if t and t.strip()]
+    c4_texts = [t for t in c4_train["text"] if t and t.strip()]
+    if not wt_texts or not c4_texts:
+        raise ValueError("wikitext2 or c4 train split is empty after filtering blank texts")
+
+    random.seed(seed)
+    mixed_texts = []
+    for _ in range(nsamples):
+        for _ in range(wt_ratio):
+            mixed_texts.append(random.choice(wt_texts))
+        for _ in range(c4_ratio):
+            mixed_texts.append(random.choice(c4_texts))
+    random.shuffle(mixed_texts)
+
+    trainenc = tokenizer("\n\n".join(mixed_texts), return_tensors="pt")
+    if trainenc.input_ids.shape[1] < 8:
+        raise ValueError("tokenized mixed corpus is unexpectedly too short")
+
+    trainloader = []
+    inps = []
+    for _ in range(nsamples):
+        max_start = trainenc.input_ids.shape[1] - seqlen
+        i = random.randint(0, max_start) if max_start > 0 else 0
+        inp = trainenc.input_ids[:, i:i + seqlen]
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+        inps.append(inp)
+
+    return trainloader, inps
+
+
 DATASET_LOADERS = {
     "wikitext2": get_wikitext2,
     "c4": get_c4,
@@ -155,6 +225,12 @@ DATASET_LOADERS = {
     "humaneval": get_humaneval,
     "arc_challenge": get_arc_challenge,
     "arc_mix": get_arc_mix,
+    "wikitext2_c4_mix_1to1": lambda nsamples, seed, seqlen, tokenizer: get_wikitext2_c4_mix(
+        nsamples, seed, seqlen, tokenizer, wt_ratio=1, c4_ratio=1
+    ),
+    "wikitext2_c4_mix_3to1": lambda nsamples, seed, seqlen, tokenizer: get_wikitext2_c4_mix(
+        nsamples, seed, seqlen, tokenizer, wt_ratio=3, c4_ratio=1
+    ),
 }
         
 def main():

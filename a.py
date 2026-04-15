@@ -5,5 +5,12 @@ import torch
 # b = torch.load("/gemini/code/NMSparsity/ARCQuant/outputs/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b/NVFP4/exp_20260320_172657/softmax_alpha_wikitext2_max.pt")
 # print(b['softmax_alpha'].shape)
 
-c = torch.load("/data/shichao/ARCQuant/saved/llama-3.1-8b_reorder_index_wikitext2_max.pt")
+# c = torch.load("/data/shichao/ARCQuant/saved/llama-3.1-8b_reorder_index_wikitext2_max.pt")
+# print(c['layers.0.self_attn.q_proj.input'])
+
+c = torch.load("/data/shichao/ARCQuant/saved/llama-3.1-8b_reorder_index_arc_mix_max.pt")
 print(c['layers.0.self_attn.q_proj.input'])
+d = torch.load("/data/shichao/ARCQuant/saved/llama-3.1-8b_reorder_index_wikitext2_max.pt")
+print(d['layers.0.self_attn.q_proj.input'])
+print(torch.sum(c['layers.0.self_attn.q_proj.input'] == d['layers.0.self_attn.q_proj.input']))
+print(c['layers.0.self_attn.q_proj.input'].shape)

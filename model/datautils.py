@@ -116,6 +116,175 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
 
     return trainloader, valenc, tokenizer
 
+
+def _build_lm_window_trainloader_from_texts(texts, nsamples, seed, seqlen, tokenizer):
+    import random
+
+    trainenc = tokenizer("\n\n".join(texts), return_tensors='pt')
+    if trainenc.input_ids.shape[1] <= seqlen:
+        raise ValueError(
+            f"tokenized mixed corpus too short for seqlen={seqlen}: "
+            f"{trainenc.input_ids.shape[1]}"
+        )
+
+    random.seed(seed)
+    trainloader = []
+    for _ in range(nsamples):
+        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+        j = i + seqlen
+        inp = trainenc.input_ids[:, i:j]
+        tar = inp.clone()
+        tar[:, :-1] = -100
+        trainloader.append((inp, tar))
+    return trainloader, trainenc
+
+
+def get_wikitext2_c4_mix(nsamples, seed, seqlen, model, tokenizer, *, wt_ratio, c4_ratio):
+    """Build a simple text-level mixture of wikitext2 and C4.
+
+    The ratio is enforced by repeating/concatenating texts before tokenization.
+    Validation follows wikitext2 so perplexity remains comparable to the main line.
+    """
+    from datasets import Dataset, concatenate_datasets, load_dataset
+
+    def _load_c4_from_cache(split: str):
+        cache_root = Path.home() / ".cache" / "huggingface" / "datasets" / "allenai___c4"
+        if split == "train":
+            base = cache_root / "default-b04fc8a0b8562884" / "0.0.0" / "1588ec454efa1a09f29cd18ddd04fe05fc8653a2"
+            arrow_files = sorted(base.glob("c4-train-*.arrow"))
+        elif split == "validation":
+            base = cache_root / "default-c7bc8b0aefc5e48f" / "0.0.0" / "1588ec454efa1a09f29cd18ddd04fe05fc8653a2"
+            arrow_files = sorted(base.glob("c4-validation*.arrow"))
+        else:
+            raise ValueError(f"unsupported split: {split}")
+
+        if not arrow_files:
+            raise FileNotFoundError(f"no cached C4 arrow files found for split={split} under {base}")
+
+        datasets = [Dataset.from_file(str(p)) for p in arrow_files]
+        return datasets[0] if len(datasets) == 1 else concatenate_datasets(datasets)
+
+    wt_train = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    wt_test = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
+
+    try:
+        c4_train = load_dataset(
+            'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
+        )
+    except Exception:
+        c4_train = _load_c4_from_cache("train")
+
+    wt_texts = [t for t in wt_train['text'] if t and t.strip()]
+    c4_texts = [t for t in c4_train['text'] if t and t.strip()]
+    if not wt_texts or not c4_texts:
+        raise ValueError("wikitext2 or c4 train split is empty after filtering blank texts")
+
+    import random
+    random.seed(seed)
+
+    mixed_texts = []
+    total_parts = wt_ratio + c4_ratio
+    for _ in range(nsamples):
+        for _ in range(wt_ratio):
+            mixed_texts.append(random.choice(wt_texts))
+        for _ in range(c4_ratio):
+            mixed_texts.append(random.choice(c4_texts))
+    random.shuffle(mixed_texts)
+
+    trainloader, _ = _build_lm_window_trainloader_from_texts(
+        mixed_texts, nsamples=nsamples, seed=seed, seqlen=seqlen, tokenizer=tokenizer
+    )
+    testenc = tokenizer("\n\n".join(wt_test['text']), return_tensors='pt')
+    return trainloader, testenc, tokenizer
+
+def _load_ceval_texts():
+    """Load all CEVAL dev+val splits across all subjects as formatted Chinese MCQ text."""
+    from datasets import Dataset
+
+    cache_base = Path.home() / ".cache" / "huggingface" / "datasets" / "ceval___ceval-exam"
+    hash_dir = "0.0.0/617524a00b307ff6f9933702f724131fe12ca7ce"
+
+    texts = []
+    for subj_dir in sorted(cache_base.iterdir()):
+        if not subj_dir.is_dir():
+            continue
+        for split in ("dev", "val"):
+            arrow = subj_dir / hash_dir / f"ceval-exam-{split}.arrow"
+            if not arrow.exists():
+                continue
+            ds = Dataset.from_file(str(arrow))
+            for ex in ds:
+                q = ex.get("question", "").strip()
+                if not q:
+                    continue
+                opts = "\n".join(
+                    f"{k}. {ex[k]}" for k in ("A", "B", "C", "D") if ex.get(k, "").strip()
+                )
+                answer = ex.get("answer", "").strip()
+                explanation = ex.get("explanation", "").strip()
+                text = f"题目：{q}\n{opts}\n答案：{answer}"
+                if explanation:
+                    text += f"\n解析：{explanation}"
+                texts.append(text)
+
+    if not texts:
+        raise FileNotFoundError(f"no CEVAL texts found under {cache_base}")
+    return texts
+
+
+def get_wikitext2_c4_zh_mix(nsamples, seed, seqlen, model, tokenizer, *, wt_ratio, c4_ratio, zh_ratio):
+    """3-way text-level mixture of wikitext2, C4, and CEVAL Chinese (dev+val).
+
+    zh_ratio controls the proportion of Chinese CEVAL examples mixed in.
+    Validation follows wikitext2 so perplexity remains comparable to the main line.
+    """
+    from datasets import Dataset, concatenate_datasets, load_dataset
+    import random
+
+    def _load_c4_from_cache(split: str):
+        cache_root = Path.home() / ".cache" / "huggingface" / "datasets" / "allenai___c4"
+        if split == "train":
+            base = cache_root / "default-b04fc8a0b8562884" / "0.0.0" / "1588ec454efa1a09f29cd18ddd04fe05fc8653a2"
+            arrow_files = sorted(base.glob("c4-train-*.arrow"))
+        else:
+            raise ValueError(f"unsupported split: {split}")
+        if not arrow_files:
+            raise FileNotFoundError(f"no cached C4 arrow files found for split={split} under {base}")
+        datasets = [Dataset.from_file(str(p)) for p in arrow_files]
+        return datasets[0] if len(datasets) == 1 else concatenate_datasets(datasets)
+
+    wt_train = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    wt_test = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
+
+    try:
+        c4_train = load_dataset(
+            'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
+        )
+    except Exception:
+        c4_train = _load_c4_from_cache("train")
+
+    wt_texts = [t for t in wt_train['text'] if t and t.strip()]
+    c4_texts = [t for t in c4_train['text'] if t and t.strip()]
+    zh_texts = _load_ceval_texts()
+
+    random.seed(seed)
+    mixed_texts = []
+    for _ in range(nsamples):
+        for _ in range(wt_ratio):
+            mixed_texts.append(random.choice(wt_texts))
+        for _ in range(c4_ratio):
+            mixed_texts.append(random.choice(c4_texts))
+        for _ in range(zh_ratio):
+            mixed_texts.append(random.choice(zh_texts))
+    random.shuffle(mixed_texts)
+
+    trainloader, _ = _build_lm_window_trainloader_from_texts(
+        mixed_texts, nsamples=nsamples, seed=seed, seqlen=seqlen, tokenizer=tokenizer
+    )
+    testenc = tokenizer("\n\n".join(wt_test['text']), return_tensors='pt')
+    return trainloader, testenc, tokenizer
+
+
 def get_ptb_new(nsamples, seed, seqlen, model, tokenizer):
     from datasets import load_dataset
     traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
@@ -271,6 +440,26 @@ def get_loaders(
         from transformers import AutoTokenizer 
         tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, legacy=False)
     
+    if name == 'wikitext2_c4_mix_1to1':
+        return get_wikitext2_c4_mix(
+            nsamples, seed, seqlen, model, tokenizer, wt_ratio=1, c4_ratio=1
+        )
+    if name == 'wikitext2_c4_mix_3to1':
+        return get_wikitext2_c4_mix(
+            nsamples, seed, seqlen, model, tokenizer, wt_ratio=3, c4_ratio=1
+        )
+    if name == 'wikitext2_c4_zh_mix_1to1to1':
+        return get_wikitext2_c4_zh_mix(
+            nsamples, seed, seqlen, model, tokenizer, wt_ratio=1, c4_ratio=1, zh_ratio=1
+        )
+    if name == 'wikitext2_c4_zh_mix_2to2to1':
+        return get_wikitext2_c4_zh_mix(
+            nsamples, seed, seqlen, model, tokenizer, wt_ratio=2, c4_ratio=2, zh_ratio=1
+        )
+    if name == 'wikitext2_c4_zh_mix_3to3to2':
+        return get_wikitext2_c4_zh_mix(
+            nsamples, seed, seqlen, model, tokenizer, wt_ratio=3, c4_ratio=3, zh_ratio=2
+        )
     if 'wikitext2' in name:
         return get_wikitext2(nsamples, seed, seqlen, model, tokenizer)
     if 'ptb' in name:
