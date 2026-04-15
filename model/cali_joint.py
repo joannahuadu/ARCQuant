@@ -92,7 +92,18 @@ def main():
     parser.add_argument("model", type=str)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dataset", type=str, default="wikitext2",
-                        choices=["wikitext2", "c4", "pile", "humaneval", "arc_mix"])
+                        choices=[
+                            "wikitext2",
+                            "c4",
+                            "pile",
+                            "humaneval",
+                            "arc_mix",
+                            "wikitext2_c4_mix_1to1",
+                            "wikitext2_c4_mix_3to1",
+                            "wikitext2_c4_zh_mix_1to1to1",
+                            "wikitext2_c4_zh_mix_2to2to1",
+                            "wikitext2_c4_zh_mix_3to3to2",
+                        ])
     parser.add_argument("--act_sort_metric", type=str, default="max",
                         choices=["mean", "frobenius", "hessian", "max"])
     parser.add_argument("--quant_type", type=str, default="NVFP4",
