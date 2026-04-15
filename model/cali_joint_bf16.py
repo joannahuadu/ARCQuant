@@ -180,6 +180,8 @@ def main():
     )
     for layer in model.model.layers:
         for xm in iter_layer_x_mask_modules(layer):
+            if x_mask_r_thr is not None:
+                xm.x_mask_r_thr = x_mask_r_thr
             xm.x_mask_train_hard_r_thr = bool(args.x_mask_train_hard_r_thr)
             xm.x_mask_r_thr_ste_tau = float(args.x_mask_r_thr_ste_tau)
 

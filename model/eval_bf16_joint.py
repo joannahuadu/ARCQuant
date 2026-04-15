@@ -64,6 +64,7 @@ def _load_bf16_hook_checkpoint(model, ckpt_path: str) -> dict:
     meta = ckpt.get("meta", {}) or {}
     x_mask_r_thr = meta.get("x_mask_r_thr", -1.0)
     x_mask_r_thr = None if x_mask_r_thr is None or float(x_mask_r_thr) < 0 else float(x_mask_r_thr)
+    print(x_mask_r_thr)
     use_attn_output_scale = bool(meta.get("train_attn_output_scale", False)) or "output_scale" in ckpt
     use_mlp_output_scale = bool(meta.get("train_mlp_output_scale", False)) or "mlp_output_scale" in ckpt
 
