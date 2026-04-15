@@ -90,7 +90,7 @@ if __name__ == '__main__':
     parser.add_argument('--fewshot_overrides', type=str, default='{"mmlu": 5, "ceval-valid": 5}',
         help='JSON dict of per-task fewshot overrides, e.g. \'{"mmlu": 5, "ceval-valid": 5}\'')
     parser.add_argument(
-        "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval", "arc_mix"], 
+        "--dataset", type=str, default="wikitext2", choices=["wikitext2", "c4", "pile", "humaneval", "arc_mix", "wikitext2_c4_mix_1to1", "wikitext2_c4_mix_3to1"], 
         help="The calibration dataset to use."
     )
     parser.add_argument(
@@ -146,6 +146,10 @@ if __name__ == '__main__':
         default="",
         help="Comma/range list of layer ids to skip softmax alpha, e.g. '0,1,8-15'.",
     )
+    parser.add_argument("--attn_low_rank_layers", type=str, default="", help="Comma/range list of attention layers that enable output low-rank residual.")
+    parser.add_argument("--attn_low_rank_rank", type=int, default=0, help="Low-rank rank for selected attention layers.")
+    parser.add_argument("--mlp_low_rank_layers", type=str, default="", help="Comma/range list of MLP layers that enable output low-rank residual.")
+    parser.add_argument("--mlp_low_rank_rank", type=int, default=0, help="Low-rank rank for selected MLP layers.")
   
     
     args = parser.parse_args()
@@ -198,6 +202,10 @@ if __name__ == '__main__':
         "x_mask_alpha": float(args.x_mask_alpha),
         "x_mask_skip_layers": args.x_mask_skip_layers,
         "x_mask_r_thr": None if float(args.x_mask_r_thr) < 0 else float(args.x_mask_r_thr),
+        "attn_low_rank_layers": args.attn_low_rank_layers,
+        "attn_low_rank_rank": int(args.attn_low_rank_rank),
+        "mlp_low_rank_layers": args.mlp_low_rank_layers,
+        "mlp_low_rank_rank": int(args.mlp_low_rank_rank),
     }
     if "llama" in args.model.lower():
         reorder_kwargs["rec"] = bool(args.rec)

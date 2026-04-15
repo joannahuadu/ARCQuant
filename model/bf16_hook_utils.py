@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import torch
 from torch import nn
 
+from low_rank import LowRankResidual
 from x_mask import XMaskSwitchTop2Hard
 
 
@@ -32,6 +33,8 @@ def _make_input_mask_hook(owner: nn.Module, mask_name: str):
         mask = getattr(owner, mask_name, None)
         if mask is None or not inputs:
             return None
+        if getattr(owner, "_cache_low_rank_input_name", None) == mask_name:
+            owner._joint_plus_low_rank_input = inputs[0]
         return (mask(inputs[0]),) + tuple(inputs[1:])
 
     return _hook
@@ -44,8 +47,9 @@ def _make_q_proj_output_hook(attn: nn.Module):
         alpha = getattr(attn, "softmax_alpha", None)
         if alpha is None:
             return output
-        scale = alpha.to(device=output.device, dtype=output.dtype).repeat_interleave(attn.head_dim)
-        return output * scale.view(*([1] * (output.dim() - 1)), -1)
+        scale = alpha.to(device=output.device).repeat_interleave(attn.head_dim)
+        scale = scale.view(*([1] * (output.dim() - 1)), -1)
+        return (output.float() * scale).to(dtype=output.dtype)
 
     return _hook
 
@@ -57,8 +61,22 @@ def _make_output_scale_hook(owner: nn.Module, attr_name: str):
         output_scale = getattr(owner, attr_name, None)
         if output_scale is None:
             return output
-        scale = output_scale.to(device=output.device, dtype=output.dtype)
-        return output * scale.view(*([1] * (output.dim() - 1)), -1)
+        scale = output_scale.to(device=output.device)
+        scale = scale.view(*([1] * (output.dim() - 1)), -1)
+        return (output.float() * scale).to(dtype=output.dtype)
+
+    return _hook
+
+
+def _make_output_low_rank_hook(owner: nn.Module):
+    def _hook(_module: nn.Module, _inputs: Tuple[torch.Tensor, ...], output: torch.Tensor):
+        if not getattr(owner, "joint_plus_enabled", True):
+            return output
+        low_rank = getattr(owner, "output_low_rank", None)
+        low_rank_input = getattr(owner, "_joint_plus_low_rank_input", None)
+        if low_rank is None or low_rank_input is None:
+            return output
+        return output + low_rank(low_rank_input)
 
     return _hook
 
@@ -75,6 +93,7 @@ def _attach_joint_plus_to_attention(
     token_mlp_chunk_size: int,
     token_use_layer_scale: bool,
     use_attn_output_scale: bool,
+    output_low_rank_rank: int,
 ) -> None:
     ref_device = attn.q_proj.weight.device
     attn.x_mask_in = (
@@ -109,6 +128,13 @@ def _attach_joint_plus_to_attention(
     attn.register_buffer("softmax_alpha", torch.ones(attn.num_heads, dtype=torch.float32, device=ref_device))
     if use_attn_output_scale:
         attn.register_buffer("output_scale", torch.ones(attn.hidden_size, dtype=torch.float32, device=ref_device))
+    attn.output_low_rank = None
+    attn.output_low_rank_rank = 0
+    attn._cache_low_rank_input_name = "x_mask_in"
+    attn._joint_plus_low_rank_input = None
+    if int(output_low_rank_rank) > 0:
+        attn.output_low_rank = LowRankResidual(attn.hidden_size, int(output_low_rank_rank)).to(device=ref_device)
+        attn.output_low_rank_rank = int(output_low_rank_rank)
     attn.joint_plus_enabled = True
     attn._joint_plus_hook_handles = [
         attn.q_proj.register_forward_pre_hook(_make_input_mask_hook(attn, "x_mask_in")),
@@ -121,6 +147,8 @@ def _attach_joint_plus_to_attention(
         attn._joint_plus_hook_handles.append(
             attn.o_proj.register_forward_hook(_make_output_scale_hook(attn, "output_scale")),
         )
+    if attn.output_low_rank is not None:
+        attn._joint_plus_hook_handles.append(attn.o_proj.register_forward_hook(_make_output_low_rank_hook(attn)))
 
 def _attach_joint_plus_to_mlp(
     mlp: nn.Module,
@@ -134,6 +162,7 @@ def _attach_joint_plus_to_mlp(
     token_mlp_chunk_size: int,
     token_use_layer_scale: bool,
     use_mlp_output_scale: bool,
+    output_low_rank_rank: int,
 ) -> None:
     ref_device = mlp.gate_proj.weight.device
     hidden_size = getattr(mlp, "hidden_size", mlp.gate_proj.in_features)
@@ -169,6 +198,13 @@ def _attach_joint_plus_to_mlp(
 
     if use_mlp_output_scale:
         mlp.register_buffer("mlp_output_scale", torch.ones(mlp.down_proj.out_features, dtype=torch.float32, device=ref_device))
+    mlp.output_low_rank = None
+    mlp.output_low_rank_rank = 0
+    mlp._cache_low_rank_input_name = "x_mask_up"
+    mlp._joint_plus_low_rank_input = None
+    if int(output_low_rank_rank) > 0:
+        mlp.output_low_rank = LowRankResidual(mlp.down_proj.out_features, int(output_low_rank_rank)).to(device=ref_device)
+        mlp.output_low_rank_rank = int(output_low_rank_rank)
     mlp.joint_plus_enabled = True
     mlp._joint_plus_hook_handles = [
         mlp.gate_proj.register_forward_pre_hook(_make_input_mask_hook(mlp, "x_mask_up")),
@@ -179,6 +215,8 @@ def _attach_joint_plus_to_mlp(
         mlp._joint_plus_hook_handles.append(
             mlp.down_proj.register_forward_hook(_make_output_scale_hook(mlp, "mlp_output_scale"))
         )
+    if mlp.output_low_rank is not None:
+        mlp._joint_plus_hook_handles.append(mlp.down_proj.register_forward_hook(_make_output_low_rank_hook(mlp)))
 
 
 def apply_bf16_joint_plus(
@@ -194,8 +232,16 @@ def apply_bf16_joint_plus(
     token_use_layer_scale: bool = True,
     use_mlp_output_scale: bool = False,
     use_attn_output_scale: bool = False,
+    attn_low_rank_layers=None,
+    attn_low_rank_rank: int = 0,
+    mlp_low_rank_layers=None,
+    mlp_low_rank_rank: int = 0,
 ):
-    for layer in model.model.layers:
+    from x_mask_utils import parse_layer_spec
+
+    attn_low_rank_layers = parse_layer_spec(attn_low_rank_layers)
+    mlp_low_rank_layers = parse_layer_spec(mlp_low_rank_layers)
+    for layer_idx, layer in enumerate(model.model.layers):
         attn = getattr(layer, "self_attn", None)
         if attn is not None and not getattr(attn, "_joint_plus_applied", False):
             if getattr(attn.config, "pretraining_tp", 1) > 1:
@@ -214,6 +260,7 @@ def apply_bf16_joint_plus(
                 token_mlp_chunk_size=token_mlp_chunk_size,
                 token_use_layer_scale=token_use_layer_scale,
                 use_attn_output_scale=use_attn_output_scale,
+                output_low_rank_rank=attn_low_rank_rank if layer_idx in attn_low_rank_layers else 0,
             )
             attn._joint_plus_applied = True
 
@@ -241,6 +288,7 @@ def apply_bf16_joint_plus(
                 token_mlp_chunk_size=token_mlp_chunk_size,
                 token_use_layer_scale=token_use_layer_scale,
                 use_mlp_output_scale=use_mlp_output_scale,
+                output_low_rank_rank=mlp_low_rank_rank if layer_idx in mlp_low_rank_layers else 0,
             )
             mlp._joint_plus_applied = True
     return model
@@ -261,6 +309,8 @@ def split_bf16_joint_params(
     train_alpha: bool = False,
     train_attn_output_scale: bool = False,
     train_mlp_output_scale: bool = False,
+    train_attn_low_rank: bool = False,
+    train_mlp_low_rank: bool = False,
 ) -> Tuple[list[nn.Parameter], list[nn.Parameter]]:
     gate_params: list[nn.Parameter] = []
     alpha_params: list[nn.Parameter] = []
@@ -284,10 +334,18 @@ def split_bf16_joint_params(
         if train_attn_output_scale and attn is not None and hasattr(attn, "output_scale"):
             attn.output_scale.requires_grad_(True)
             alpha_params.append(attn.output_scale)
+        if train_attn_low_rank and attn is not None and getattr(attn, "output_low_rank", None) is not None:
+            for param in attn.output_low_rank.parameters():
+                param.requires_grad_(True)
+                alpha_params.append(param)
         mlp = getattr(layer, "mlp", None)
         if train_mlp_output_scale and mlp is not None and hasattr(mlp, "mlp_output_scale"):
             mlp.mlp_output_scale.requires_grad_(True)
             alpha_params.append(mlp.mlp_output_scale)
+        if train_mlp_low_rank and mlp is not None and getattr(mlp, "output_low_rank", None) is not None:
+            for param in mlp.output_low_rank.parameters():
+                param.requires_grad_(True)
+                alpha_params.append(param)
 
     return gate_params, alpha_params
 
@@ -298,6 +356,7 @@ def save_bf16_joint_checkpoint(
     *,
     meta: Optional[Dict[str, Any]] = None,
     include_mlp_output_scale: bool = False,
+    include_low_rank: bool = True,
 ) -> None:
     ckpt_layers: Dict[int, Dict[str, torch.Tensor]] = {}
     alpha_by_layer = []
@@ -307,8 +366,10 @@ def save_bf16_joint_checkpoint(
     for idx, layer in enumerate(model.model.layers):
         keep = {}
         for key, value in layer.state_dict().items():
-            if "x_mask" in key or key.endswith("softmax_alpha") or key.endswith("output_scale"):
+            if "x_mask" in key or "output_low_rank" in key or key.endswith("softmax_alpha") or key.endswith("output_scale"):
                 if not include_mlp_output_scale and key.endswith("mlp_output_scale"):
+                    continue
+                if not include_low_rank and "output_low_rank" in key:
                     continue
                 keep[key] = value.detach().cpu()
         ckpt_layers[idx] = keep

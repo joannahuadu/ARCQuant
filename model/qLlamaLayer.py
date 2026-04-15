@@ -7,6 +7,7 @@ from qLinearLayer import QLinearLayer
 from quantize import *
 from visualize import *
 from x_mask import XMaskSwitchTop2Hard
+from low_rank import LowRankResidual
 import os
 from optional_agemm import HAS_AGEMM, require_agemm
 
@@ -134,6 +135,8 @@ class QLlamaDecoderLayer(nn.Module):
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
         x_mask_r_thr: Optional[float] = None,
+        output_low_rank_rank: int = 0,
+        mlp_output_low_rank_rank: int = 0,
         rec: bool = False,
     ):
         super().__init__()
@@ -151,6 +154,7 @@ class QLlamaDecoderLayer(nn.Module):
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
             x_mask_r_thr=x_mask_r_thr,
+            output_low_rank_rank=output_low_rank_rank,
             rec=rec,
         )
         # self.self_attn = originalLayer.self_attn
@@ -165,6 +169,7 @@ class QLlamaDecoderLayer(nn.Module):
             x_mask_tau=x_mask_tau,
             x_mask_alpha=x_mask_alpha,
             x_mask_r_thr=x_mask_r_thr,
+            output_low_rank_rank=mlp_output_low_rank_rank,
             rec=rec,
         )
         # self.mlp = originalLayer.mlp
@@ -272,6 +277,7 @@ class QLlamaAttention(nn.Module):
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
         x_mask_r_thr: Optional[float] = None,
+        output_low_rank_rank: int = 0,
         rec: bool = False,
     ):
         super().__init__()
@@ -345,8 +351,23 @@ class QLlamaAttention(nn.Module):
         # Applied to the dense o_proj output — does NOT disturb the 2:4 sparse qx
         # that feeds into the matrix multiply.
         self.register_buffer("output_scale", torch.ones(self.hidden_size, dtype=torch.float32))
+        self.output_low_rank = None
+        self.output_low_rank_rank = 0
+        self.configure_output_low_rank(output_low_rank_rank)
 
         self.attention_dropout=originalAttn.attention_dropout
+
+    def configure_output_low_rank(self, rank: int) -> None:
+        rank = int(rank)
+        if rank <= 0:
+            self.output_low_rank = None
+            self.output_low_rank_rank = 0
+            return
+        if self.output_low_rank is not None and int(getattr(self.output_low_rank, "rank", -1)) == rank:
+            self.output_low_rank_rank = rank
+            return
+        self.output_low_rank = LowRankResidual(self.hidden_size, rank)
+        self.output_low_rank_rank = rank
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -358,6 +379,8 @@ class QLlamaAttention(nn.Module):
         self.v_proj = self.v_proj.to(*args, **kwargs)
         self.o_proj = self.o_proj.to(*args, **kwargs)
         self.rotary_emb = self.rotary_emb.to(*args, **kwargs)
+        if self.output_low_rank is not None:
+            self.output_low_rank = self.output_low_rank.to(*args, **kwargs)
       
         return self
 
@@ -374,6 +397,7 @@ class QLlamaAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         
 
+        residual_input = hidden_states
         bsz, q_len, _ = hidden_states.size()
         
         hidden_states = hidden_states.reshape(bsz * q_len, -1).contiguous()
@@ -412,9 +436,9 @@ class QLlamaAttention(nn.Module):
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         # [bsz, nh, t, hd]
-        query_states = query_states * self.softmax_alpha.to(
-            device=query_states.device, dtype=query_states.dtype
-        ).view(1, self.num_heads, 1, 1)
+        query_states = (query_states.float() * self.softmax_alpha.view(1, self.num_heads, 1, 1)).to(
+            dtype=query_states.dtype
+        )
 
         if past_key_value is not None:
             # reuse k, v, self_attention
@@ -473,7 +497,9 @@ class QLlamaAttention(nn.Module):
 
         # Position B: per-channel scale on the dense o_proj output.
         # The 2:4 sparse matmul is already done; this is a plain dense correction.
-        attn_output = attn_output * self.output_scale.to(attn_output.dtype)
+        attn_output = (attn_output.float() * self.output_scale).to(attn_output.dtype)
+        if self.output_low_rank is not None:
+            attn_output = attn_output + self.output_low_rank(residual_input)
 
         if not output_attentions:
             attn_weights = None
@@ -495,6 +521,7 @@ class QLlamaMLP(nn.Module):
         x_mask_tau: float = 1.0,
         x_mask_alpha: float = 1.0,
         x_mask_r_thr: Optional[float] = None,
+        output_low_rank_rank: int = 0,
         rec: bool = False,
     ):
         super().__init__()
@@ -549,6 +576,9 @@ class QLlamaMLP(nn.Module):
         )
         # Per-channel output scale applied after the dense down_proj output.
         self.register_buffer("mlp_output_scale", torch.ones(originalMLP.down_proj.out_features, dtype=torch.float32))
+        self.output_low_rank = None
+        self.output_low_rank_rank = 0
+        self.configure_output_low_rank(output_low_rank_rank)
         self.act_fn = originalMLP.act_fn
         self.layer_idx = i
         
@@ -558,6 +588,8 @@ class QLlamaMLP(nn.Module):
         self.gate_proj = self.gate_proj.to(*args, **kwargs)
         self.down_proj = self.down_proj.to(*args, **kwargs)
         self.up_proj = self.up_proj.to(*args, **kwargs)
+        if self.output_low_rank is not None:
+            self.output_low_rank = self.output_low_rank.to(*args, **kwargs)
         
 
         return self
@@ -565,6 +597,7 @@ class QLlamaMLP(nn.Module):
     def forward(self, x):
         # input X: [b, seq, dim]: quantized
 
+        residual_input = x
         bsz, q_len, _ = x.shape
         x = x.reshape(bsz * q_len, -1).contiguous()
         if not torch.is_grad_enabled():
@@ -602,4 +635,19 @@ class QLlamaMLP(nn.Module):
         )
         tmpResult = (qx, scale_x, scale, bsz, q_len)
         out = self.down_proj(tmpResult)
-        return out * self.mlp_output_scale.to(out.dtype)
+        out = (out.float() * self.mlp_output_scale).to(out.dtype)
+        if self.output_low_rank is not None:
+            out = out + self.output_low_rank(residual_input)
+        return out
+    def configure_output_low_rank(self, rank: int) -> None:
+        rank = int(rank)
+        if rank <= 0:
+            self.output_low_rank = None
+            self.output_low_rank_rank = 0
+            return
+        hidden_size = self.down_proj.out_features
+        if self.output_low_rank is not None and int(getattr(self.output_low_rank, "rank", -1)) == rank:
+            self.output_low_rank_rank = rank
+            return
+        self.output_low_rank = LowRankResidual(hidden_size, rank)
+        self.output_low_rank_rank = rank

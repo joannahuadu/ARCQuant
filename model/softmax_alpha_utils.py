@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Iterable
 
 import torch
+from low_rank import configure_model_low_rank
 from x_mask_utils import parse_layer_spec
 
 
@@ -154,6 +155,22 @@ def set_model_mlp_output_scale(model, mlp_output_scale, *, skip_layers=None) -> 
 def load_softmax_alpha_checkpoint(model, path: str, *, skip_layers=None):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     meta = ckpt.get("meta", {}) if isinstance(ckpt, dict) else {}
+    if hasattr(model, "module"):
+        model = model.module
+    if isinstance(meta, dict):
+        configure_model_low_rank(
+            model,
+            attn_layers=meta.get("attn_low_rank_layers", ""),
+            attn_rank=int(meta.get("attn_low_rank_rank", 0) or 0),
+            mlp_layers=meta.get("mlp_low_rank_layers", ""),
+            mlp_rank=int(meta.get("mlp_low_rank_rank", 0) or 0),
+        )
+        layers = getattr(getattr(model, "model", model), "layers", None)
+        if layers is not None:
+            for key, state in (ckpt.get("layers", {}) or {}).items():
+                idx = int(key)
+                if 0 <= idx < len(layers):
+                    layers[idx].load_state_dict(state, strict=False)
     alpha = set_model_softmax_alpha(model, ckpt, skip_layers=skip_layers)
     if isinstance(ckpt, dict) and "output_scale" in ckpt:
         set_model_output_scale(model, ckpt["output_scale"], skip_layers=skip_layers)

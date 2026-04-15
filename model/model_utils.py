@@ -33,12 +33,18 @@ def reorder_model_llama(
     x_mask_r_thr=None,
     rec: bool = False,
     x_mask_skip_layers=None,
+    attn_low_rank_layers=None,
+    attn_low_rank_rank: int = 0,
+    mlp_low_rank_layers=None,
+    mlp_low_rank_rank: int = 0,
 ):
     model.config.use_cache = False
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
 
     skip_layers = parse_layer_spec(x_mask_skip_layers)
+    attn_low_rank_layers = parse_layer_spec(attn_low_rank_layers)
+    mlp_low_rank_layers = parse_layer_spec(mlp_low_rank_layers)
     for i in tqdm(range(len(layers))):
         layers[i] = layers[i].to(device)
         layer_use_x_mask = bool(use_x_mask) and i not in skip_layers
@@ -55,10 +61,16 @@ def reorder_model_llama(
                 x_mask_tau=x_mask_tau,
                 x_mask_alpha=x_mask_alpha,
                 x_mask_r_thr=x_mask_r_thr,
+                output_low_rank_rank=attn_low_rank_rank if i in attn_low_rank_layers else 0,
+                mlp_output_low_rank_rank=mlp_low_rank_rank if i in mlp_low_rank_layers else 0,
                 rec=rec,
             )
         elif isinstance(layers[i], QLlamaDecoderLayer):
             m = layers[i]
+            if hasattr(m.self_attn, "configure_output_low_rank"):
+                m.self_attn.configure_output_low_rank(attn_low_rank_rank if i in attn_low_rank_layers else 0)
+            if hasattr(m.mlp, "configure_output_low_rank"):
+                m.mlp.configure_output_low_rank(mlp_low_rank_rank if i in mlp_low_rank_layers else 0)
             
         nameTemplate = 'layers.{}.{}.{}.{}'
         m.mlp.register_buffer('up_reorder_index', reorder_index[nameTemplate.format(i, 'mlp', 'up_proj', 'input')].to(torch.int16))
@@ -85,6 +97,10 @@ def reorder_model_qwen(
     x_mask_alpha: float = 1.0,
     x_mask_r_thr=None,
     x_mask_skip_layers=None,
+    attn_low_rank_layers=None,
+    attn_low_rank_rank: int = 0,
+    mlp_low_rank_layers=None,
+    mlp_low_rank_rank: int = 0,
 ):
     model.config.use_cache = False
     layers = model.model.layers
@@ -134,6 +150,10 @@ def reorder_model_mixtral(
     x_mask_alpha: float = 1.0,
     x_mask_r_thr=None,
     x_mask_skip_layers=None,
+    attn_low_rank_layers=None,
+    attn_low_rank_rank: int = 0,
+    mlp_low_rank_layers=None,
+    mlp_low_rank_rank: int = 0,
 ):
     model.config.use_cache = False
     layers = model.model.layers

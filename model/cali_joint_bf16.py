@@ -97,6 +97,10 @@ def main():
     parser.add_argument("--x_mask_token_mlp_chunk_size", type=int, default=1024)
     parser.add_argument("--train_attn_output_scale", action="store_true")
     parser.add_argument("--train_mlp_output_scale", action="store_true")
+    parser.add_argument("--attn_low_rank_layers", type=str, default="")
+    parser.add_argument("--attn_low_rank_rank", type=int, default=0)
+    parser.add_argument("--mlp_low_rank_layers", type=str, default="")
+    parser.add_argument("--mlp_low_rank_rank", type=int, default=0)
     parser.add_argument("--x_mask_token_mlp_shared", action="store_true")
     parser.add_argument("--x_mask_token_no_mlp_shared", action="store_true")
     parser.add_argument("--x_mask_token_use_layer_scale", action="store_true")
@@ -144,6 +148,10 @@ def main():
         token_use_layer_scale=not bool(args.x_mask_token_no_layer_scale),
         use_mlp_output_scale=args.train_mlp_output_scale,
         use_attn_output_scale=args.train_attn_output_scale,
+        attn_low_rank_layers=args.attn_low_rank_layers,
+        attn_low_rank_rank=int(args.attn_low_rank_rank),
+        mlp_low_rank_layers=args.mlp_low_rank_layers,
+        mlp_low_rank_rank=int(args.mlp_low_rank_rank),
     )
 
     x_mask_token_mlp_shared = True
@@ -268,7 +276,9 @@ def main():
             layer,
             train_alpha=True,
             train_attn_output_scale=args.train_attn_output_scale, 
-            train_mlp_output_scale=args.train_mlp_output_scale
+            train_mlp_output_scale=args.train_mlp_output_scale,
+            train_attn_low_rank=int(args.attn_low_rank_rank) > 0,
+            train_mlp_low_rank=int(args.mlp_low_rank_rank) > 0,
         )
         gate_filtered = []
         for param in trainable_gate:
@@ -295,9 +305,19 @@ def main():
             if attn is not None and (param is getattr(attn, "softmax_alpha", None) or param is getattr(attn, "output_scale", None)):
                 param.requires_grad_(True)
                 alpha_filtered.append(param)
+            elif attn is not None and getattr(attn, "output_low_rank", None) is not None and any(
+                param is p for p in attn.output_low_rank.parameters()
+            ):
+                param.requires_grad_(True)
+                alpha_filtered.append(param)
             elif (
                 mlp is not None
                 and param is getattr(mlp, "mlp_output_scale", None)
+            ):
+                param.requires_grad_(True)
+                alpha_filtered.append(param)
+            elif mlp is not None and getattr(mlp, "output_low_rank", None) is not None and any(
+                param is p for p in mlp.output_low_rank.parameters()
             ):
                 param.requires_grad_(True)
                 alpha_filtered.append(param)
@@ -363,6 +383,12 @@ def main():
                             ):
                                 mlp_scale_dev = mlp.mlp_output_scale.float() - 1.0
                                 loss = loss + args.alpha_reg * (mlp_scale_dev * mlp_scale_dev).mean()
+                            if attn is not None and getattr(attn, "output_low_rank", None) is not None:
+                                for param in attn.output_low_rank.parameters():
+                                    loss = loss + args.alpha_reg * param.float().pow(2).mean()
+                            if mlp is not None and getattr(mlp, "output_low_rank", None) is not None:
+                                for param in mlp.output_low_rank.parameters():
+                                    loss = loss + args.alpha_reg * param.float().pow(2).mean()
 
                     mse += loss.detach().cpu()
                     loss = loss / loss.clone().detach().clamp_min(1e-12)
@@ -424,6 +450,18 @@ def main():
                         f"mlp_output_scale: mean={ms.mean():.4f} min={ms.min():.4f} max={ms.max():.4f} "
                         f"std={ms.std():.4f} |s-1|_mean={(ms-1).abs().mean():.4f}"
                     )
+                if attn is not None and getattr(attn, "output_low_rank", None) is not None:
+                    norms = [p.detach().float().norm() for p in attn.output_low_rank.parameters()]
+                    logger.info(
+                        f"attn_output_low_rank: rank={getattr(attn, 'output_low_rank_rank', 0)} "
+                        f"param_norm_mean={torch.stack(norms).mean():.4f}"
+                    )
+                if mlp is not None and getattr(mlp, "output_low_rank", None) is not None:
+                    norms = [p.detach().float().norm() for p in mlp.output_low_rank.parameters()]
+                    logger.info(
+                        f"mlp_output_low_rank: rank={getattr(mlp, 'output_low_rank_rank', 0)} "
+                        f"param_norm_mean={torch.stack(norms).mean():.4f}"
+                    )
 
         if optimizer is not None:
             del optimizer
@@ -476,8 +514,14 @@ def main():
             "joint": True,
             "bf16_variant": args.exp_name,
             "train_attn_output_scale": bool(args.train_attn_output_scale),
+            "train_mlp_output_scale": bool(args.train_mlp_output_scale),
+            "attn_low_rank_layers": args.attn_low_rank_layers,
+            "attn_low_rank_rank": int(args.attn_low_rank_rank),
+            "mlp_low_rank_layers": args.mlp_low_rank_layers,
+            "mlp_low_rank_rank": int(args.mlp_low_rank_rank),
         },
         include_mlp_output_scale=bool(args.train_mlp_output_scale),
+        include_low_rank=bool(args.attn_low_rank_rank > 0 or args.mlp_low_rank_rank > 0),
     )
     print(f"Saved bf16 joint checkpoint: {out_path}")
 

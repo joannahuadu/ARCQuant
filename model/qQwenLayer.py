@@ -313,6 +313,7 @@ class QQwen2Attention(nn.Module):
         )
         self.rotary_emb = originalAttn.rotary_emb
         self.register_buffer("softmax_alpha", torch.ones(self.num_heads, dtype=torch.float32))
+        self.register_buffer("output_scale", torch.ones(self.hidden_size, dtype=torch.float32))
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -374,9 +375,9 @@ class QQwen2Attention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         # [bsz, nh, t, hd]
-        query_states = query_states * self.softmax_alpha.to(
-            device=query_states.device, dtype=query_states.dtype
-        ).view(1, self.num_heads, 1, 1)
+        query_states = (query_states.float() * self.softmax_alpha.view(1, self.num_heads, 1, 1)).to(
+           dtype=query_states.dtype
+        )
     
         if past_key_value is not None:
             # reuse k, v, self_attention
@@ -435,6 +436,7 @@ class QQwen2Attention(nn.Module):
         )
         attn_output = (qx, scale_x, scale, bsz, q_len)
         attn_output = self.o_proj(attn_output)
+        attn_output = (attn_output.float() * self.output_scale).to(dtype=attn_output.dtype)
 
         if not output_attentions:
             attn_weights = None
@@ -557,4 +559,4 @@ class QQwen2MLP(nn.Module):
         
         tmpResult = (qx, scale_x, scale, bsz, q_len)
         out = self.down_proj(tmpResult)
-        return out * self.mlp_output_scale.to(out.dtype)
+        return (out.float() * self.mlp_output_scale).to(out.dtype)

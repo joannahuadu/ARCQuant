@@ -20,12 +20,12 @@ from x_mask_utils import configure_x_mask_token_gate, iter_layer_x_mask_modules
 
 def _first_real_layer_device(layer) -> torch.device:
     for name, param in layer.named_parameters():
-        if "x_mask" in name or name.endswith(("softmax_alpha", "output_scale", "mlp_output_scale")):
+        if "x_mask" in name or "output_low_rank" in name or name.endswith(("softmax_alpha", "output_scale", "mlp_output_scale")):
             continue
         if param.device.type != "meta":
             return param.device
     for name, buffer in layer.named_buffers():
-        if "x_mask" in name or name.endswith(("softmax_alpha", "output_scale", "mlp_output_scale")):
+        if "x_mask" in name or "output_low_rank" in name or name.endswith(("softmax_alpha", "output_scale", "mlp_output_scale")):
             continue
         if buffer.device.type != "meta":
             return buffer.device
@@ -43,11 +43,17 @@ def _move_joint_modules_to_layer_device(layer) -> None:
             tensor = getattr(attn, name, None)
             if tensor is not None:
                 setattr(attn, name, tensor.to(device=device))
+        low_rank = getattr(attn, "output_low_rank", None)
+        if low_rank is not None:
+            attn.output_low_rank = low_rank.to(device=device)
 
     mlp = getattr(layer, "mlp", None)
     tensor = getattr(mlp, "mlp_output_scale", None) if mlp is not None else None
     if tensor is not None:
         setattr(mlp, "mlp_output_scale", tensor.to(device=device))
+    low_rank = getattr(mlp, "output_low_rank", None) if mlp is not None else None
+    if low_rank is not None:
+        mlp.output_low_rank = low_rank.to(device=device)
 
 
 def _load_bf16_hook_checkpoint(model, ckpt_path: str) -> dict:
@@ -73,6 +79,10 @@ def _load_bf16_hook_checkpoint(model, ckpt_path: str) -> dict:
         token_use_layer_scale=bool(meta.get("x_mask_token_use_layer_scale", True)),
         use_attn_output_scale=use_attn_output_scale,
         use_mlp_output_scale=use_mlp_output_scale,
+        attn_low_rank_layers=meta.get("attn_low_rank_layers", ""),
+        attn_low_rank_rank=int(meta.get("attn_low_rank_rank", 0) or 0),
+        mlp_low_rank_layers=meta.get("mlp_low_rank_layers", ""),
+        mlp_low_rank_rank=int(meta.get("mlp_low_rank_rank", 0) or 0),
     )
     configure_x_mask_token_gate(
         model,
