@@ -15,7 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from bf16_hook_utils import apply_bf16_joint_plus
 from datautils import get_loaders
 from eval import eval_ppl
-from x_mask_utils import configure_x_mask_token_gate, iter_layer_x_mask_modules
+from x_mask_utils import configure_x_mask_token_gate, iter_layer_x_mask_modules, set_layer_x_mask_eval_mode
 
 
 def _first_real_layer_device(layer) -> torch.device:
@@ -107,6 +107,12 @@ def _load_bf16_hook_checkpoint(model, ckpt_path: str) -> dict:
             continue
         layers[idx].load_state_dict(state, strict=False, assign=True)
         _move_joint_modules_to_layer_device(layers[idx])
+        set_layer_x_mask_eval_mode(layers[idx], True)
+
+    # Ensure all x-mask modules run in eval mode during benchmarking, even for
+    # layers that do not receive checkpoint state.
+    for layer in layers:
+        set_layer_x_mask_eval_mode(layer, True)
 
     meta = dict(meta)
     meta.update(
